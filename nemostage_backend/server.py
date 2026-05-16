@@ -3,6 +3,7 @@ import hashlib
 import io
 import itertools
 import json
+import logging
 import os
 import re
 import subprocess
@@ -13,6 +14,13 @@ import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any, Set
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("nemostage")
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -1126,11 +1134,14 @@ def ask_agent(prompt: str, agent: str = "main", timeout: int = 300, session_id: 
         cmd.extend(["--session-id", session_id])
     cmd.extend(["--message", prompt, "--json"])
 
+    log.info("[agent:%s] PROMPT (%d chars):\n%s", agent, len(prompt), prompt)
+
     result = subprocess.run(
         cmd,
         capture_output=True, text=True, env=env, timeout=timeout
     )
     if result.returncode != 0:
+        log.error("[agent:%s] FAILED (rc=%d): %s", agent, result.returncode, result.stderr[:500] or result.stdout[:500])
         raise HTTPException(
             status_code=502,
             detail=f"Agent {agent} failed: {result.stderr[:500] or result.stdout[:500]}"
@@ -1144,7 +1155,9 @@ def ask_agent(prompt: str, agent: str = "main", timeout: int = 300, session_id: 
                 data = json.loads(line)
                 payloads = data.get("result", {}).get("payloads", [])
                 if payloads:
-                    return payloads[0].get("text", "")
+                    reply = payloads[0].get("text", "")
+                    log.info("[agent:%s] REPLY (%d chars):\n%s", agent, len(reply), reply)
+                    return reply
             except json.JSONDecodeError:
                 pass
 
@@ -1153,14 +1166,18 @@ def ask_agent(prompt: str, agent: str = "main", timeout: int = 300, session_id: 
         data = json.loads(result.stdout)
         payloads = data.get("result", {}).get("payloads", [])
         if payloads:
-            return payloads[0].get("text", "")
+            reply = payloads[0].get("text", "")
+            log.info("[agent:%s] REPLY (%d chars):\n%s", agent, len(reply), reply)
+            return reply
     except json.JSONDecodeError:
         pass
 
+    log.error("[agent:%s] NO PARSEABLE RESPONSE: %s", agent, result.stdout[:300])
     raise HTTPException(status_code=502, detail=f"Agent {agent} returned no parseable response: {result.stdout[:300]}")
 
 
 def _sync_ollama_call(prompt: str, timeout: int, base_url: str, model: str) -> str:
+    log.info("[ollama:%s@%s] PROMPT (%d chars):\n%s", model, base_url, len(prompt), prompt)
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -1174,7 +1191,9 @@ def _sync_ollama_call(prompt: str, timeout: int, base_url: str, model: str) -> s
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         result = json.loads(resp.read())
-    return result["choices"][0]["message"]["content"]
+    reply = result["choices"][0]["message"]["content"]
+    log.info("[ollama:%s@%s] REPLY (%d chars):\n%s", model, base_url, len(reply), reply)
+    return reply
 
 
 def _sync_brev_call(prompt: str, timeout: int) -> str:
