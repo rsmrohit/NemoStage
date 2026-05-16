@@ -13,15 +13,45 @@ export interface BoundingBox {
   height: number
 }
 
+export interface ImageCrop {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
 export interface DoclingElement {
   type: 'text' | 'image' | 'shape'
-  bbox: BoundingBox
+  bbox: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
   content: string
   style?: {
     font?: string
     fontSize?: number
     color?: string
   }
+  textRuns?: TextRun[]
+  crop?: ImageCrop  // ← Add this
+}
+
+export interface TextRun {
+  text: string
+  font: string
+  size: number
+  bold?: boolean
+  italic?: boolean
+  color: string
+}
+
+export interface SlideData {
+  slideIndex: number
+  elements: DoclingElement[]
+  speakerNotes?: string
+  unmappedText?: string
 }
 
 export interface SlideData {

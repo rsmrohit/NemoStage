@@ -65,6 +65,7 @@ export interface DoclingElement {
     color?: string
   }
   textRuns?: TextRun[]  
+  crop?: ImageCrop  
 }
 
 export interface SlideData {
@@ -211,17 +212,25 @@ export interface PptxSlide {
   speakerNotes?: string
 }
 
+export interface ImageCrop {
+  left: number    // Percentage from left (0-100)
+  top: number     // Percentage from top (0-100)
+  right: number   // Percentage from right (0-100)
+  bottom: number  // Percentage from bottom (0-100)
+}
+
 export interface PptxElement {
   type: 'text' | 'image' | 'shape'
   bbox: {
-    x: number      // In EMUs
-    y: number      // In EMUs
-    width: number  // In EMUs
-    height: number // In EMUs
+    x: number
+    y: number
+    width: number
+    height: number
   }
   content?: string
   textRuns?: TextRun[]
-  embedId?: string  // For images
+  imagePath?: string
+  crop?: ImageCrop
 }
 
 export interface TextRun {

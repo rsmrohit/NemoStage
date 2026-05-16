@@ -293,38 +293,38 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     console.log(`[pptx:getData] ✅ Found slide with ${slide.elements.length} elements`)
     
     // Convert PptxElement to DoclingElement format (for renderer compatibility)
-    const elements: DoclingElement[] = slide.elements.map(element => {
-      if (element.type === 'text') {
-        // Calculate primary font/size from textRuns
-        const firstRun = element.textRuns?.[0]
-        
-        return {
-          type: 'text',
-          bbox: element.bbox,
-          content: element.content || '',
-          style: {
-            font: firstRun?.font || 'Calibri',
-            fontSize: firstRun?.size || 18,
-            color: firstRun?.color || '#000000'
-          },
-          textRuns: element.textRuns  // Include full styling info
+      const elements: DoclingElement[] = slide.elements.map(element => {
+        if (element.type === 'text') {
+          const firstRun = element.textRuns?.[0]
+          
+          return {
+            type: 'text',
+            bbox: element.bbox,
+            content: element.content || '',
+            style: {
+              font: firstRun?.font || 'Calibri',
+              fontSize: firstRun?.size || 18,
+              color: firstRun?.color || '#000000'
+            },
+            textRuns: element.textRuns
+          }
+        } else if (element.type === 'image') {
+          return {
+            type: 'image',
+            bbox: element.bbox,
+            content: element.imagePath ? toFileUrl(element.imagePath) : '',  // Convert to nemostage-media:// URL
+            style: {},
+            crop: element.crop
+          }
+        } else {
+          return {
+            type: element.type,
+            bbox: element.bbox,
+            content: '',
+            style: {}
+          }
         }
-      } else if (element.type === 'image') {
-        return {
-          type: 'image',
-          bbox: element.bbox,
-          content: element.embedId || '',  // Image reference
-          style: {}
-        }
-      } else {
-        return {
-          type: element.type,
-          bbox: element.bbox,
-          content: '',
-          style: {}
-        }
-      }
-    })
+      })
 
     console.log(`[pptx:getData] 📊 Returning ${elements.length} elements`)
     

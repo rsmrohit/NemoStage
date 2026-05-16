@@ -2,7 +2,7 @@ import PizZip from 'pizzip'
 import { parseStringPromise } from 'xml2js'
 import fs from 'fs-extra'
 import path from 'path'
-import type { PptxManifest, PptxSlide, PptxElement, TextRun } from '../types'
+import type { PptxManifest, PptxSlide, PptxElement, TextRun, ImageCrop } from '../types'
 
 export async function parsePPTXStructure(
   pptxPath: string,
@@ -14,9 +14,12 @@ export async function parsePPTXStructure(
   const data = await fs.readFile(pptxPath)
   const zip = new PizZip(data)
   
-  // Get slide dimensions from presentation.xml
+  // Get slide dimensions
   const { slideWidth, slideHeight } = await getSlideDimensions(zip)
   console.log('[pptxXmlParser] Slide dimensions:', { slideWidth, slideHeight })
+  
+  // Extract all images first
+  const imagePathMap = await extractImagesToMedia(zip, sessionDir)
   
   // Parse each slide
   const slides: PptxSlide[] = []
@@ -24,12 +27,12 @@ export async function parsePPTXStructure(
   
   while (true) {
     const slideFile = zip.file(`ppt/slides/slide${slideNum}.xml`)
-    if (!slideFile) break  // No more slides
+    if (!slideFile) break
     
     console.log(`[pptxXmlParser] Parsing slide ${slideNum}`)
     
     const slideXml = slideFile.asText()
-    const slide = await parseSlide(slideXml, slideNum - 1, zip)
+    const slide = await parseSlide(slideXml, slideNum - 1, slideNum, zip, imagePathMap)
     
     // Get speaker notes (optional)
     const notesFile = zip.file(`ppt/notesSlides/notesSlide${slideNum}.xml`)
@@ -72,9 +75,18 @@ async function getSlideDimensions(zip: PizZip): Promise<{ slideWidth: number, sl
   }
 }
 
-async function parseSlide(xml: string, slideIndex: number, zip: PizZip): Promise<PptxSlide> {
+async function parseSlide(
+  xml: string,
+  slideIndex: number,
+  slideNum: number,
+  zip: PizZip,
+  imagePathMap: Map<string, string>
+): Promise<PptxSlide> {
   const parsed = await parseStringPromise(xml)
   const elements: PptxElement[] = []
+  
+  // Get image relationships for this slide
+  const imageRelationships = await parseSlideRelationships(zip, slideNum)
   
   // Navigate to the shape tree
   const spTree = parsed['p:sld']?.['p:cSld']?.[0]?.['p:spTree']?.[0]
@@ -91,10 +103,10 @@ async function parseSlide(xml: string, slideIndex: number, zip: PizZip): Promise
     }
   }
   
-  // Parse picture shapes (p:pic)
+  // Parse picture shapes (p:pic) - NOW WITH IMAGE RESOLUTION
   const pictures = spTree['p:pic'] || []
   for (const pic of pictures) {
-    const element = await parsePictureShape(pic)
+    const element = await parsePictureShape(pic, imageRelationships, imagePathMap)
     if (element) {
       elements.push(element)
     }
@@ -169,7 +181,11 @@ async function parseTextShape(shape: any): Promise<PptxElement | null> {
   }
 }
 
-async function parsePictureShape(pic: any): Promise<PptxElement | null> {
+async function parsePictureShape(
+  pic: any,
+  imageRelationships: Map<string, string>,
+  imagePathMap: Map<string, string>
+): Promise<PptxElement | null> {
   try {
     // Extract position and size
     const xfrm = pic['p:spPr']?.[0]?.['a:xfrm']?.[0]
@@ -187,13 +203,48 @@ async function parsePictureShape(pic: any): Promise<PptxElement | null> {
     }
     
     // Get image reference
-    const blip = pic['p:blipFill']?.[0]?.['a:blip']?.[0]
+    const blipFill = pic['p:blipFill']?.[0]
+    const blip = blipFill?.['a:blip']?.[0]
     const embedId = blip?.$?.['r:embed']
+    
+    if (!embedId) return null
+    
+    // Extract crop data from srcRect
+    const srcRect = blipFill?.['a:srcRect']?.[0]?.$
+    let crop: ImageCrop | undefined
+    
+    if (srcRect) {
+      // PowerPoint stores crop as percentages (0-100000, where 100000 = 100%)
+      crop = {
+        left: srcRect.l ? parseInt(srcRect.l) / 1000 : 0,      // Convert to percentage
+        top: srcRect.t ? parseInt(srcRect.t) / 1000 : 0,
+        right: srcRect.r ? parseInt(srcRect.r) / 1000 : 0,
+        bottom: srcRect.b ? parseInt(srcRect.b) / 1000 : 0
+      }
+      
+      console.log(`[pptxXmlParser] Image crop:`, crop)
+    }
+    
+    // Resolve embedId → image path
+    const relativeImagePath = imageRelationships.get(embedId)
+    if (!relativeImagePath) {
+      console.warn(`[pptxXmlParser] No relationship found for embedId: ${embedId}`)
+      return null
+    }
+    
+    const absoluteImagePath = imagePathMap.get(relativeImagePath)
+    if (!absoluteImagePath) {
+      console.warn(`[pptxXmlParser] No image file found for path: ${relativeImagePath}`)
+      return null
+    }
+    
+    console.log(`[pptxXmlParser] Resolved image: ${embedId} → ${path.basename(absoluteImagePath)}`)
     
     return {
       type: 'image',
       bbox,
-      embedId  // We'll resolve this to actual image path later
+      imagePath: absoluteImagePath,
+      crop  // Include crop data
     }
   } catch (error) {
     console.error('[pptxXmlParser] Error parsing picture:', error)
@@ -257,4 +308,75 @@ async function parseSpeakerNotes(xml: string): Promise<string> {
     console.error('[pptxXmlParser] Error parsing speaker notes:', error)
     return ''
   }
+}
+
+async function parseSlideRelationships(
+  zip: PizZip,
+  slideNum: number
+): Promise<Map<string, string>> {
+  const relsFile = zip.file(`ppt/slides/_rels/slide${slideNum}.xml.rels`)
+  if (!relsFile) {
+    return new Map()
+  }
+
+  const relsXml = relsFile.asText()
+  const parsed = await parseStringPromise(relsXml)
+  
+  const relationships = parsed['Relationships']?.['Relationship'] || []
+  const imageMap = new Map<string, string>()
+  
+  for (const rel of relationships) {
+    const id = rel.$.Id
+    const target = rel.$.Target
+    const type = rel.$.Type
+    
+    // Check if it's an image relationship
+    if (type?.includes('image')) {
+      // Target is like "../media/image1.png"
+      imageMap.set(id, target)
+    }
+  }
+  
+  console.log(`[pptxXmlParser] Found ${imageMap.size} image relationships for slide ${slideNum}`)
+  return imageMap
+}
+
+
+async function extractImagesToMedia(
+  zip: PizZip,
+  sessionDir: string
+): Promise<Map<string, string>> {
+  const mediaDir = path.join(sessionDir, 'media')
+  await fs.ensureDir(mediaDir)
+  
+  const imagePathMap = new Map<string, string>()
+  
+  // Get all files in ppt/media/
+  const mediaFiles = Object.keys(zip.files).filter(name => 
+    name.startsWith('ppt/media/') && !name.endsWith('/')
+  )
+  
+  console.log(`[pptxXmlParser] Extracting ${mediaFiles.length} media files`)
+  
+  for (const mediaFile of mediaFiles) {
+    const file = zip.file(mediaFile)
+    if (!file) continue
+    
+    // Get filename (e.g., "image1.png")
+    const fileName = path.basename(mediaFile)
+    const outputPath = path.join(mediaDir, fileName)
+    
+    // Extract the image
+    const content = file.asNodeBuffer()
+    await fs.writeFile(outputPath, content)
+    
+    // Map the relative path from PPTX to the absolute output path
+    // e.g., "../media/image1.png" → "/full/path/to/media/image1.png"
+    imagePathMap.set(`../media/${fileName}`, outputPath)
+    imagePathMap.set(`media/${fileName}`, outputPath)  // Some PPTXs use this format
+    
+    console.log(`[pptxXmlParser] Extracted: ${fileName}`)
+  }
+  
+  return imagePathMap
 }

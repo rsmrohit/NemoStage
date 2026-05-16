@@ -18,18 +18,47 @@ interface ImageOverlayProps {
   element: DoclingElement
 }
 
-export function ImageOverlay({ element }: ImageOverlayProps): React.JSX.Element | null {
-  if (!element.content) {
-    return null
+export function ImageOverlay({ element }: ImageOverlayProps): React.JSX.Element {
+  const style: CSSProperties = {
+    ...scaleCoordinates(element),
+    overflow: 'hidden'
+  }
+
+  // Calculate crop using CSS clip-path or object-position
+  const imageStyle: CSSProperties = {}
+  
+  if (element.crop) {
+    const { left, top, right, bottom } = element.crop
+    
+    // Method 1: Use object-fit and object-position (simpler but less precise)
+    // This shows the uncropped portion
+    imageStyle.objectFit = 'cover'
+    imageStyle.objectPosition = `${-left}% ${-top}%`
+    imageStyle.width = `${100 + left + right}%`
+    imageStyle.height = `${100 + top + bottom}%`
+    
+    // Method 2: Use clip-path (more precise)
+    // Uncomment this if you prefer clip-path approach
+    /*
+    const clipLeft = left
+    const clipTop = top
+    const clipRight = 100 - right
+    const clipBottom = 100 - bottom
+    imageStyle.clipPath = `inset(${clipTop}% ${clipRight}% ${clipBottom}% ${clipLeft}%)`
+    */
   }
 
   return (
-    <img
-      className="image-overlay"
-      src={element.content}
-      alt=""
-      style={scaleCoordinates(element)}
-      draggable={false}
-    />
+    <div className="image-overlay" style={style}>
+      <img 
+        src={element.content} 
+        alt="" 
+        style={{
+          width: '100%',
+          height: '100%',
+          ...imageStyle
+        }}
+      />
+    </div>
   )
 }
