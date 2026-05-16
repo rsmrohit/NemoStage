@@ -1,3 +1,7 @@
 node_modules/
-venv/
 .venv/
+venv/
+env/
+*.cpp/
+transcripts/
+diagnostics/
