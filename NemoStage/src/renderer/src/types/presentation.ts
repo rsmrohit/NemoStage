@@ -57,25 +57,3 @@ export interface ExtractionProgressEvent {
   progress: number
   message: string
 }
-
-export interface ElectronAPI {
-  selectPPTX: () => Promise<string | null>
-  getFileStats: (filePath: string) => Promise<{ size: number; mtimeMs: number } | null>
-  extractPPTX: (filePath: string) => Promise<ExtractionResult>
-  getSlideImage: (sessionId: string, slideIndex: number) => Promise<string | null>
-  getSlideData: (sessionId: string, slideIndex: number) => Promise<SlideData>
-  getRecentSessions: () => Promise<SessionMetadata[]>
-  resumeSession: (sessionId: string) => Promise<ExtractionResult>
-  updateSessionState: (sessionId: string, currentSlide: number) => Promise<boolean>
-  clearSession: (sessionId: string) => Promise<boolean>
-  onExtractionProgress: (callback: (event: ExtractionProgressEvent) => void) => () => void
-  onDoclingReady: (callback: (event: { sessionId: string }) => void) => () => void
-  onDoclingError: (callback: (event: { sessionId: string; message: string }) => void) => () => void
-  onLog: (callback: (event: { sessionId: string; message: string }) => void) => () => void
-}
-
-declare global {
-  interface Window {
-    electronAPI: ElectronAPI
-  }
-}
