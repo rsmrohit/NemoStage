@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import time
+import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any, Set
@@ -30,16 +31,22 @@ OPENCLAW_GATEWAY_TOKEN = "3f34f9ef7832494ab392baedf419b9515a1b9da0dbb429f6"
 OPENCLAW_BIN = "/home/asus/.npm-global/bin/openclaw"
 
 ALLOWED_SIGNALS = {"confused", "interested", "lost"}
-REGISTERED_AGENTS = {"main", "livetranscript", "audience"}
+REGISTERED_AGENTS = {"main", "slidegen", "audience"}
 MAX_AGENT_SLIDE_TEXT_CHARS = 1200
 CHROMA_ROOT = "/home/asus/nemostage-chroma"
+BREV_OLLAMA_URL = "http://127.0.0.1:11436"
+BREV_OLLAMA_MODEL = "gemma4:26b"
+MAX_RECENT_QA = 20
 DECK_INDEX_PATH = os.path.join(CHROMA_ROOT, "decks.json")
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 VECTOR_TOP_K = 5
-VECTOR_RELEVANCE_DISTANCE_THRESHOLD = 0.35
+VECTOR_RELEVANCE_DISTANCE_THRESHOLD = 0.45
 
 _embedding_model = None
 _chroma_client = None
+
+generated_slides: dict[str, list[dict]] = {}
+recent_qa: list[dict] = []
 
 
 class PresentationSlide(BaseModel):
@@ -94,6 +101,7 @@ class DeckIndexInfo(BaseModel):
     chunks_indexed: int = 0
     vectorization_error: str | None = None
     updated_at: float
+    style_spec: dict | None = None
 
 
 presentation_sessions: dict[str, PresentationSession] = {}
@@ -291,6 +299,42 @@ def extract_pptx_slide_documents(content: bytes) -> list[dict]:
     return documents
 
 
+def extract_deck_style(content: bytes) -> dict:
+    style: dict = {"bg_color": "#1a1a2e", "accent_color": "#4f8ef7", "font_family": "Calibri"}
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            names = set(z.namelist())
+            if "ppt/theme/theme1.xml" in names:
+                tree = ET.fromstring(z.read("ppt/theme/theme1.xml"))
+                ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+                accent = tree.find(".//a:accent1/a:srgbClr", ns)
+                if accent is not None:
+                    val = accent.get("val", "")
+                    if val:
+                        style["accent_color"] = "#" + val
+                font_el = tree.find(".//a:latin", ns)
+                if font_el is not None:
+                    typeface = font_el.get("typeface", "")
+                    if typeface and typeface not in ("+mj-lt", "+mn-lt"):
+                        style["font_family"] = typeface
+            slide_paths = sorted(
+                [n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)],
+                key=slide_number_from_path,
+            )
+            if slide_paths:
+                tree = ET.fromstring(z.read(slide_paths[0]))
+                ns2 = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+                       "a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+                bg = tree.find(".//a:solidFill/a:srgbClr", ns2)
+                if bg is not None:
+                    val = bg.get("val", "")
+                    if val:
+                        style["bg_color"] = "#" + val
+    except Exception:
+        pass
+    return style
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     model = get_embedding_model()
     embeddings = model.encode(texts, normalize_embeddings=True)
@@ -301,6 +345,7 @@ def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) 
     deck_id = hashlib.sha256(content).hexdigest()
     collection_name = collection_name_for_deck(deck_id)
     now = time.time()
+    style_spec = extract_deck_style(content)
 
     try:
         slide_documents = extract_pptx_slide_documents(content)
@@ -342,6 +387,7 @@ def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) 
             vectorization_status="ready",
             chunks_indexed=len(slide_documents),
             updated_at=now,
+            style_spec=style_spec,
         )
     except Exception as exc:
         info = DeckIndexInfo(
@@ -353,6 +399,7 @@ def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) 
             chunks_indexed=0,
             vectorization_error=str(exc),
             updated_at=now,
+            style_spec=style_spec,
         )
 
     deck_indexes_by_filename[filename] = info
@@ -496,22 +543,95 @@ def ask_agent(prompt: str, agent: str = "main", timeout: int = 300, session_id: 
     raise HTTPException(status_code=502, detail=f"Agent {agent} returned no parseable response: {result.stdout[:300]}")
 
 
+def _sync_brev_call(prompt: str, timeout: int) -> str:
+    payload = json.dumps({
+        "model": BREV_OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        f"{BREV_OLLAMA_URL}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        result = json.loads(resp.read())
+    return result["choices"][0]["message"]["content"]
+
+
+async def ask_brev_ollama(prompt: str, timeout: int = 120) -> str:
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(None, _sync_brev_call, prompt, timeout)
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"Brev Ollama unreachable: {exc}")
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Brev Ollama bad response: {exc}")
+
+
+async def generate_slide_background(
+    presentation_id: str, topic: str, after_slide: int, session: "PresentationSession"
+) -> None:
+    deck_info = find_deck_index(session.file_name)
+    style_spec = (deck_info.style_spec or {}) if deck_info else {}
+
+    fake_session = type("_S", (), {
+        "deck_id": session.deck_id,
+        "collection_name": session.collection_name,
+        "vectorization_status": session.vectorization_status,
+        "vectorization_error": session.vectorization_error,
+    })()
+    vector_search = query_deck_vectors(fake_session, topic)  # type: ignore[arg-type]
+    top_matches = (vector_search.get("matches") or [])[:2]
+    context_block = "\n\n".join(
+        f"slide_index={m['metadata'].get('slide_index')}, title: {m['metadata'].get('title')}\n{m['document'][:600]}"
+        for m in top_matches
+    ) if top_matches else "[no slide context available]"
+
+    prompt = (
+        "You are generating a supplemental slide for a live presentation. "
+        "The speaker just covered a topic not in their deck. "
+        "Create a slide that matches the deck's style and depth.\n\n"
+        f"Topic not covered: {topic}\n\n"
+        f"Relevant slide context from the deck:\n{context_block}\n\n"
+        f"Deck style spec: bg_color={style_spec.get('bg_color', '#1a1a2e')}, "
+        f"accent_color={style_spec.get('accent_color', '#4f8ef7')}, "
+        f"font_family={style_spec.get('font_family', 'Calibri')}\n\n"
+        "Return EXACTLY one JSON object:\n"
+        '{"title": "<5-8 word title>", "bullets": ["<point 1>", "<point 2>", "<point 3>"], '
+        '"notes": "<1-2 sentence speaker notes>", '
+        '"style_hint": {"bg": "<hex>", "accent": "<hex>", "font": "<family>"}}\n'
+        "Return only the JSON. No markdown, no explanation."
+    )
+
+    try:
+        reply = await ask_brev_ollama(prompt, timeout=90)
+        parsed = parse_json_reply(reply)
+        if not isinstance(parsed, dict) or "title" not in parsed:
+            return
+        entry = {
+            "index": len(generated_slides.get(presentation_id, [])),
+            "title": parsed.get("title", topic),
+            "bullets": parsed.get("bullets", []),
+            "notes": parsed.get("notes", ""),
+            "style_hint": parsed.get("style_hint", style_spec),
+            "after_slide": after_slide,
+            "topic": topic,
+            "created_at": time.time(),
+        }
+        generated_slides.setdefault(presentation_id, []).append(entry)
+    except Exception:
+        pass
+
+
 @app.get("/agents")
 def list_registered_agents():
     return {
         "agents": [
-            {
-                "id": "main",
-                "purpose": "general NemoClaw presentation assistant",
-            },
-            {
-                "id": "livetranscript",
-                "purpose": "standalone live transcript ingestion and slide-tracking probe",
-            },
-            {
-                "id": "audience",
-                "purpose": "standalone audience engagement analysis probe",
-            },
+            {"id": "main", "purpose": "general NemoClaw presentation assistant"},
+            {"id": "slidegen", "purpose": "generates supplemental slides for off-slide topics"},
+            {"id": "audience", "purpose": "audience engagement analysis probe"},
         ]
     }
 
@@ -522,29 +642,25 @@ async def livetranscript_agent(
     slide_context: str = Form(""),
     session_id: str = Form(""),
 ):
+    """Kept for backward compatibility. Now routes to slidegen agent."""
     transcript = transcript.strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="empty transcript")
 
     prompt = (
-        "You are the NemoStage live transcript ingestor. Analyze this live presentation transcript "
-        "chunk. Use slide_context only if it is provided. Classify whether the content is on the "
-        "current slide, covered by another slide, or not covered by the presentation.\n\n"
+        "Classify this live presentation transcript chunk. "
+        "Use slide_context only if provided.\n\n"
         f"slide_context:\n{slide_context.strip() or '[not provided]'}\n\n"
         f"transcript:\n{transcript}\n"
-        "\nReturn exactly one JSON object and nothing else. Schema:\n"
+        "\nReturn exactly one JSON object:\n"
         '{"coverage_status": "current_slide|other_slide|not_covered", '
         '"matched_slide": <int|null>, "summary_so_far": "<str>", '
         '"topic": "<str|null>", "reason": "<str>"}\n'
     )
-    reply = ask_agent(
-        prompt,
-        agent="livetranscript",
-        session_id=session_id.strip() or None,
-    )
+    reply = ask_agent(prompt, agent="slidegen", session_id=session_id.strip() or None)
     return JSONResponse({
         "status": "ok",
-        "agent": "livetranscript",
+        "agent": "slidegen",
         "raw": reply,
         "parsed": parse_json_reply(reply),
     })
@@ -805,6 +921,109 @@ async def analyze_presentation_transcript(payload: PresentationTranscriptRequest
     })
 
 
+@app.post("/brev/transcript")
+async def brev_transcript(payload: PresentationTranscriptRequest):
+    """Same vector search as /presentation/transcript but inference runs on Brev Ollama directly."""
+    session = get_presentation_session(payload.presentation_id)
+    transcript = payload.transcript.strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="empty transcript")
+
+    vector_search = query_deck_vectors(session, transcript)
+    if vector_search.get("status") != "ready" or not vector_search.get("matches"):
+        return JSONResponse({
+            "status": "ok",
+            "presentation_id": payload.presentation_id,
+            "current_slide": session.current_slide,
+            "agent_result": {"vector_error": vector_search.get("error", "Vector search unavailable")},
+            "coverage_status": "unknown",
+            "slide_generation_needed": False,
+            "vector_search": vector_search,
+            "backend": "brev",
+        })
+
+    vector_context = format_vector_matches_for_agent(vector_search, session.current_slide)
+    prompt = (
+        "You are tracking a live presentation. Use only the vector-retrieved slide context below; "
+        "do not open files, run tools, or assume content from slides that were not retrieved. "
+        "Classify the speaker's transcript chunk into exactly one coverage_status:\n"
+        "- current_slide: the content is covered by the current slide.\n"
+        "- other_slide: the content is not covered by the current slide, but is covered by one "
+        "of the retrieved slides from this same presentation, including a future slide.\n"
+        "- not_covered: the content is not covered by the retrieved slide context, or the only "
+        "matches are weak and do not actually support the transcript topic.\n\n"
+        "If coverage_status is other_slide, set matched_slide to the best matching slide_index. "
+        "If not_covered, set matched_slide to null and topic to the missing topic.\n\n"
+        f"Current slide_index: {session.current_slide}\n"
+        f"Vector search threshold: distance <= {VECTOR_RELEVANCE_DISTANCE_THRESHOLD} is strong; higher is weak.\n\n"
+        f"Vector-retrieved slide context:\n{vector_context}\n\n"
+        f"Transcript chunk:\n{transcript}\n\n"
+        "Return exactly one JSON object and nothing else. Schema:\n"
+        '{"coverage_status": "current_slide|other_slide|not_covered", '
+        '"matched_slide": <int|null>, "summary_so_far": "<str>", '
+        '"topic": "<str|null>", "reason": "<str>"}\n'
+    )
+
+    reply = await ask_brev_ollama(prompt)
+    parsed = parse_json_reply(reply)
+    agent_result = parsed if isinstance(parsed, dict) else {"raw": reply}
+
+    coverage_status = "unknown"
+    if isinstance(agent_result, dict):
+        raw_status = agent_result.get("coverage_status")
+        if raw_status in {"current_slide", "other_slide", "not_covered"}:
+            coverage_status = raw_status
+    slide_generation_needed = coverage_status == "not_covered"
+
+    generation_queued = False
+    if slide_generation_needed and session.deck_id:
+        topic = (agent_result.get("topic") or "unknown topic") if isinstance(agent_result, dict) else "unknown topic"
+        asyncio.create_task(generate_slide_background(payload.presentation_id, topic, session.current_slide, session))
+        generation_queued = True
+        slide_generation_needed = False
+
+    session.last_agent_result = agent_result
+    session.slide_generation_needed = slide_generation_needed
+    session.coverage_status = coverage_status
+    session.updated_at = time.time()
+    presentation_sessions[payload.presentation_id] = session
+
+    return JSONResponse({
+        "status": "ok",
+        "presentation_id": payload.presentation_id,
+        "current_slide": session.current_slide,
+        "agent_result": agent_result,
+        "coverage_status": coverage_status,
+        "slide_generation_needed": slide_generation_needed,
+        "generation_queued": generation_queued,
+        "backend": "brev",
+        "backend_model": BREV_OLLAMA_MODEL,
+        "vector_search": {
+            "status": vector_search.get("status"),
+            "collection_name": vector_search.get("collection_name"),
+            "deck_id": vector_search.get("deck_id"),
+            "best_distance": vector_search.get("best_distance"),
+            "threshold": vector_search.get("threshold"),
+            "matches": [
+                {
+                    "metadata": match.get("metadata", {}),
+                    "distance": match.get("distance"),
+                    "strong_match": match.get("strong_match"),
+                }
+                for match in vector_search.get("matches", [])
+            ],
+        },
+    })
+
+
+@app.get("/presentation/{presentation_id}/generated-slides")
+async def get_generated_slides(presentation_id: str):
+    return JSONResponse({
+        "presentation_id": presentation_id,
+        "slides": generated_slides.get(presentation_id, []),
+    })
+
+
 @app.get("/presentation/{presentation_id}")
 async def get_presentation(presentation_id: str):
     return presentation_status(get_presentation_session(presentation_id))
@@ -956,9 +1175,51 @@ async def audience_question(text: str = Form(...)):
         raise HTTPException(status_code=400, detail="empty question")
     if len(text) > 1000:
         raise HTTPException(status_code=400, detail="question too long (max 1000 chars)")
-    msg = {"type": "question", "text": text, "ts": time.time()}
+    ts = time.time()
+    msg = {"type": "question", "text": text, "ts": ts}
     await hub.broadcast(msg)
+    asyncio.create_task(_answer_audience_question(text, ts))
     return {"status": "ok"}
+
+
+async def _answer_audience_question(question: str, ts: float) -> None:
+    # Find the most recently active session with a vector index
+    active = sorted(
+        [s for s in presentation_sessions.values() if s.vectorization_status == "ready"],
+        key=lambda s: s.updated_at,
+        reverse=True,
+    )
+    vector_context = "[no slide context available]"
+    if active:
+        vector_search = query_deck_vectors(active[0], question)
+        matches = (vector_search.get("matches") or [])[:3]
+        if matches:
+            vector_context = "\n\n".join(
+                f"Slide {m['metadata'].get('slide_number')}: {m['metadata'].get('title')}\n{m['document'][:500]}"
+                for m in matches
+            )
+
+    prompt = (
+        "You are the NemoStage presentation assistant answering a live audience question. "
+        "Answer concisely in 2-3 sentences using only the slide context below. "
+        "If the context doesn't cover the question, say so briefly.\n\n"
+        f"Question: {question}\n\n"
+        f"Slide context:\n{vector_context}"
+    )
+    try:
+        answer = await ask_brev_ollama(prompt, timeout=60)
+        entry = {"question": question, "answer": answer, "ts": ts}
+        recent_qa.append(entry)
+        if len(recent_qa) > MAX_RECENT_QA:
+            recent_qa.pop(0)
+        await hub.broadcast({"type": "qa_answer", "question": question, "answer": answer, "ts": ts})
+    except Exception:
+        pass
+
+
+@app.get("/audience/qa/recent")
+async def get_recent_qa(after: float = 0):
+    return JSONResponse({"qa": [e for e in recent_qa if e["ts"] > after]})
 
 
 @app.post("/audience/signal")

@@ -112,3 +112,26 @@ export interface ExtractionProgressEvent {
   progress: number
   message: string
 }
+
+export interface StyleHint {
+  bg: string
+  accent: string
+  font: string
+}
+
+export interface GeneratedSlide {
+  index: number
+  title: string
+  bullets: string[]
+  notes: string
+  style_hint: StyleHint
+  after_slide: number
+  topic: string
+  created_at: number
+}
+
+export interface QAEntry {
+  question: string
+  answer: string
+  ts: number
+}
