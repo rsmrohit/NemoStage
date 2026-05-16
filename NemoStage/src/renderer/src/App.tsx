@@ -438,6 +438,9 @@ function AppContent(): React.JSX.Element {
         return []
       }
       
+
+      console.log(`[transcript] Flushing ${currentBuffer.length} segment(s) to API — ${combinedTranscript.length} chars`)
+
       // Send the combined chunk
       setLiveAgentStatus('analyzing')
       setLiveAgentMessage('Analyzing transcript against current slide...')
@@ -506,11 +509,12 @@ function AppContent(): React.JSX.Element {
 
     setTranscriptBuffer((prev) => [...prev, trimmedText])
 
-    // Reset the 3-second timer
+    // Only start the timer if one isn't already running — don't reset on each event
     if (batchTimerRef.current) {
-      clearTimeout(batchTimerRef.current)
+      return
     }
 
+    console.log('[transcript] Starting 20s batch timer')
     batchTimerRef.current = setTimeout(() => {
       batchTimerRef.current = null
       void flushTranscriptBuffer()
