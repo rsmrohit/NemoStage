@@ -1,15 +1,14 @@
 import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
 import fs from 'fs-extra'
 import path from 'path'
-import { pathToFileURL } from 'url'
 import type {
   DoclingManifest,
   ExtractionProgressEvent,
   ExtractionResult,
   SessionMetadata,
   SessionRuntime,
-  SlideData,
-  DoclingElement
+  DoclingElement,
+  PptxManifest
 } from './types'
 import { runDoclingParser } from './services/doclingParser'
 import { extractPPTX, extractThemeFonts, parseSlideRelationships } from './services/pptxExtractor'
@@ -23,11 +22,13 @@ import {
   touchSession,
   writeSessionMetadata
 } from './services/workspaceManager'
-import { emit } from 'process'
+
+import { parsePPTXStructure } from './services/pptxXmlParser'
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
+const PPTX_HEIGHT_EMU = 6858000
 const sessions = new Map<string, SessionRuntime>()
-const doclingManifests = new Map<string, DoclingManifest>()
+const doclingManifests = new Map<string, PptxManifest>() 
 
 function emitToRenderer(window: BrowserWindow | null, channel: string, payload: unknown): void {
   if (window && !window.isDestroyed()) {
@@ -36,7 +37,37 @@ function emitToRenderer(window: BrowserWindow | null, channel: string, payload: 
 }
 
 function toFileUrl(absolutePath: string): string {
-  return pathToFileURL(absolutePath).toString()
+  return `nemostage-media://${absolutePath}`
+}
+
+function normalizeDoclingBox(bbox: {
+  l: number
+  t: number
+  r: number
+  b: number
+  coord_origin: 'TOPLEFT' | 'BOTTOMLEFT'
+}): { x: number; y: number; width: number; height: number } {
+  const left = Math.min(bbox.l, bbox.r)
+  const width = Math.abs(bbox.r - bbox.l)
+  const rawTop = Math.min(bbox.t, bbox.b)
+  const rawBottom = Math.max(bbox.t, bbox.b)
+  const height = Math.abs(rawBottom - rawTop)
+
+  if (bbox.coord_origin === 'BOTTOMLEFT') {
+    return {
+      x: left,
+      y: PPTX_HEIGHT_EMU - rawBottom,
+      width,
+      height
+    }
+  }
+
+  return {
+    x: left,
+    y: rawTop,
+    width,
+    height
+  }
 }
 
 async function validatePptxFile(filePath: string): Promise<string[]> {
@@ -197,9 +228,14 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       emitToRenderer(getMainWindow(), 'pptx:log', { sessionId, message })
     }
 
-    void runDoclingParser(filePath, manifestPath, emitProgress, emitLog)
+    void parsePPTXStructure(filePath, sessionDir)
       .then(async (manifest) => {
-        doclingManifests.set(sessionId, manifest)
+        // Save to manifest.json
+        await fs.writeJson(manifestPath, manifest, { spaces: 2 })
+        
+        // Store in memory
+        doclingManifests.set(sessionId, manifest)  // Cast temporarily
+        
         const current = sessions.get(sessionId)
         if (current) {
           current.result.doclingStatus = 'ready'
@@ -239,68 +275,63 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
     const manifest = doclingManifests.get(sessionId)
     
-    if (!manifest || !manifest.groups) {
-      console.log('[pptx:getData] No manifest or groups')
+    if (!manifest) {
+      console.log('[pptx:getData] No manifest found')
       return { slideIndex, elements: [] }
     }
 
     console.log(`[pptx:getData] === Processing slide ${slideIndex} ===`)
     
-    // Filter by 'chapter' for PowerPoint slides
-    const slideGroups = manifest.groups.filter(g => g.label === 'chapter')
-    console.log('[pptx:getData] Total chapters:', slideGroups.length)
+    // NEW: Direct access to slides array
+    const slide = manifest.slides?.[slideIndex]
     
-    const slideGroup = slideGroups[slideIndex]
-    
-    if (!slideGroup) {
-      console.log(`[pptx:getData] ❌ No slide group at index ${slideIndex}`)
+    if (!slide) {
+      console.log(`[pptx:getData] ❌ No slide at index ${slideIndex}`)
       return { slideIndex, elements: [] }
     }
 
-    console.log(`[pptx:getData] ✅ Found slide group:`, slideGroup.name)
-    console.log(`[pptx:getData] Slide has ${slideGroup.children.length} children`)
+    console.log(`[pptx:getData] ✅ Found slide with ${slide.elements.length} elements`)
     
-    // Extract text elements that belong to this slide
-    const elements: DoclingElement[] = []
-    
-    if (manifest.texts) {
-      console.log(`[pptx:getData] Total text items in manifest:`, manifest.texts.length)
-      
-      // Get child references from the slide group
-      const slideChildRefs = new Set(slideGroup.children.map(c => c.$ref))
-      console.log(`[pptx:getData] Slide child refs:`, Array.from(slideChildRefs).slice(0, 5), '...')
-      
-      for (const textItem of manifest.texts) {
-        // Check if this text item is a child of the current slide
-        if (slideChildRefs.has(textItem.self_ref) && textItem.prov && textItem.prov[0]) {
-          const bbox = textItem.prov[0].bbox
-          
-          console.log(`[pptx:getData] ✅ Matched text: "${textItem.text.substring(0, 50)}..."`)
-          
-          elements.push({
-            type: 'text',
-            bbox: {
-              x: bbox.l,
-              y: bbox.t,
-              width: bbox.r - bbox.l,
-              height: bbox.b - bbox.t
-            },
-            content: textItem.text,
-            style: {
-              font: 'Arial',
-              fontSize: 12,
-              color: '#000000'
-            }
-          })
+    // Convert PptxElement to DoclingElement format (for renderer compatibility)
+    const elements: DoclingElement[] = slide.elements.map(element => {
+      if (element.type === 'text') {
+        // Calculate primary font/size from textRuns
+        const firstRun = element.textRuns?.[0]
+        
+        return {
+          type: 'text',
+          bbox: element.bbox,
+          content: element.content || '',
+          style: {
+            font: firstRun?.font || 'Calibri',
+            fontSize: firstRun?.size || 18,
+            color: firstRun?.color || '#000000'
+          },
+          textRuns: element.textRuns  // Include full styling info
+        }
+      } else if (element.type === 'image') {
+        return {
+          type: 'image',
+          bbox: element.bbox,
+          content: element.embedId || '',  // Image reference
+          style: {}
+        }
+      } else {
+        return {
+          type: element.type,
+          bbox: element.bbox,
+          content: '',
+          style: {}
         }
       }
-    }
+    })
 
-    console.log(`[pptx:getData] 📊 Final result: ${elements.length} text elements for slide ${slideIndex}`)
-
+    console.log(`[pptx:getData] 📊 Returning ${elements.length} elements`)
+    
     return {
       slideIndex,
-      elements
+      elements,
+      speakerNotes: slide.speakerNotes  // Include speaker notes
     }
   })
 
@@ -331,3 +362,5 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     return true
   })
 }
+
+

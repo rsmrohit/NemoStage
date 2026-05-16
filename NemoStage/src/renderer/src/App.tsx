@@ -249,7 +249,7 @@ function AppContent(): React.JSX.Element {
         {mode === 'select' && <p className="placeholder-text">Select or drop a PPTX to begin.</p>}
 
         {mode === 'gallery' && (
-          <>
+          <div className="gallery-mode">
             <SlideGallery
               slides={slides}
               currentSlide={currentSlide}
@@ -259,10 +259,12 @@ function AppContent(): React.JSX.Element {
             {currentSlideImage && (
               <div className="selected-preview">
                 <h3>Selected Slide</h3>
-                <img src={currentSlideImage} alt={`Selected slide ${currentSlide + 1}`} />
+                <div className="selected-preview-media">
+                  <img src={currentSlideImage} alt={`Selected slide ${currentSlide + 1}`} />
+                </div>
               </div>
             )}
-          </>
+          </div>
         )}
 
         {mode === 'live' && (

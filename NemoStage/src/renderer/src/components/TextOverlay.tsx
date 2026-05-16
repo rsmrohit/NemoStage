@@ -40,6 +40,9 @@ interface TextOverlayProps {
 }
 
 export function TextOverlay({ element }: TextOverlayProps): React.JSX.Element {
+  console.log('[TextOverlay] bbox:', element.bbox)
+  console.log('[TextOverlay] content:', element.content.substring(0, 30))
+
   const style: CSSProperties = {
     ...scaleCoordinates(element),
     color: element.style?.color ?? '#111827',
@@ -49,7 +52,7 @@ export function TextOverlay({ element }: TextOverlayProps): React.JSX.Element {
     lineHeight: 1.25,
     overflow: 'hidden',
     background: 'transparent',
-    border: 'none',
+    border: '1px solid red',
     outline: 'none'
   }
 

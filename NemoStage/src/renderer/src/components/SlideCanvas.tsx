@@ -1,4 +1,5 @@
 import { memo } from 'react'
+import { ImageOverlay } from './ImageOverlay'
 import { TextOverlay } from './TextOverlay'
 import type { SlideData } from '../types/presentation'
 
@@ -23,6 +24,11 @@ export const SlideCanvas = memo(function SlideCanvas({
         )}
 
         <div className="slide-overlays">
+          {slideData?.elements
+            ?.filter((element) => element.type === 'image')
+            .map((element, index) => (
+              <ImageOverlay key={`image-${currentSlide}-${index}`} element={element} />
+            ))}
           {slideData?.elements
             ?.filter((element) => element.type === 'text')
             .map((element, index) => (

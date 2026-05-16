@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, protocol } from 'electron'
+import { app, BrowserWindow, shell, protocol, net } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -55,9 +55,19 @@ function createWindow(): BrowserWindow {
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.electron')
 
+  protocol.handle('nemostage-media', (request) => {
+    const url = request.url.replace('nemostage-media://', '')
+    const filePath = decodeURIComponent(url)
+    
+    // Use net.fetch to load the file
+    return net.fetch(`file://${filePath}`)
+  })
+
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
+
+  
 
   await cleanupOldSessions()
   let mainWindow: BrowserWindow | null = createWindow()

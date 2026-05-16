@@ -13,15 +13,58 @@ export interface BoundingBox {
   height: number
 }
 
+// Add this to support the new XML parser format
+export interface PptxManifest {
+  slideCount: number
+  slideWidth: number
+  slideHeight: number
+  slides: PptxSlide[]
+}
+
+export interface PptxSlide {
+  slideIndex: number
+  elements: PptxElement[]
+  speakerNotes?: string
+}
+
+export interface PptxElement {
+  type: 'text' | 'image' | 'shape'
+  bbox: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
+  content?: string
+  textRuns?: TextRun[]
+  embedId?: string
+}
+
+export interface TextRun {
+  text: string
+  font: string
+  size: number
+  bold?: boolean
+  italic?: boolean
+  color: string
+}
+
+// Keep DoclingElement for renderer compatibility
 export interface DoclingElement {
   type: 'text' | 'image' | 'shape'
-  bbox: BoundingBox
+  bbox: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
   content: string
   style?: {
     font?: string
     fontSize?: number
     color?: string
   }
+  textRuns?: TextRun[]  
 }
 
 export interface SlideData {
@@ -45,6 +88,15 @@ export interface DoclingManifest {
   texts?: DoclingText[]
   pictures?: DoclingPicture[]
   tables?: DoclingTable[]
+  pages?: DoclingPage[]
+}
+
+export interface DoclingPage {
+  page_no: number
+  size?: {
+    width: number
+    height: number
+  }
 }
 
 export interface DoclingNode {
@@ -79,6 +131,10 @@ export interface DoclingPicture {
   self_ref: string
   label: string
   prov?: DoclingProvenance[]
+  image?: {
+    mimetype?: string
+    uri?: string
+  }
 }
 
 export interface DoclingTable {
@@ -139,4 +195,40 @@ export interface SessionRuntime {
 export interface SlideManifestEntry {
   slideIndex: number
   imagePaths: string[]
+}
+
+
+export interface PptxManifest {
+  slideCount: number
+  slideWidth: number   // In EMUs
+  slideHeight: number  // In EMUs
+  slides: PptxSlide[]
+}
+
+export interface PptxSlide {
+  slideIndex: number
+  elements: PptxElement[]
+  speakerNotes?: string
+}
+
+export interface PptxElement {
+  type: 'text' | 'image' | 'shape'
+  bbox: {
+    x: number      // In EMUs
+    y: number      // In EMUs
+    width: number  // In EMUs
+    height: number // In EMUs
+  }
+  content?: string
+  textRuns?: TextRun[]
+  embedId?: string  // For images
+}
+
+export interface TextRun {
+  text: string
+  font: string
+  size: number
+  bold?: boolean
+  italic?: boolean
+  color: string
 }
