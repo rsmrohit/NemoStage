@@ -127,9 +127,19 @@ async def upload_pptx(file: UploadFile = File(...)):
         os.unlink(tmp_path)
 
     prompt = (
-        f"A PowerPoint file was just uploaded to {dest} inside this sandbox. "
-        f"Please read the file and give a concise summary of what it contains — "
-        f"key topics, structure, and main points."
+        f"Run this command and summarize the output in plain text — no code, no function calls:\n\n"
+        f"python3 -c \"\n"
+        f"import zipfile, re\n"
+        f"z = zipfile.ZipFile('{dest}')\n"
+        f"texts = []\n"
+        f"for name in z.namelist():\n"
+        f"    if 'slides/slide' in name and name.endswith('.xml'):\n"
+        f"        xml = z.read(name).decode('utf-8', errors='replace')\n"
+        f"        texts.append(re.sub(r'<[^>]+>', ' ', xml))\n"
+        f"print('\\n---\\n'.join(texts))\n"
+        f"\"\n\n"
+        f"Once you have the slide text, reply with a concise summary: key topics, structure, and main points. "
+        f"Plain prose only — no code blocks, no function calls in your reply."
     )
     summary = ask_agent(prompt)
 
