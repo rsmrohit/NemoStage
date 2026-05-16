@@ -5,6 +5,7 @@ import { NavigationControls } from './components/NavigationControls'
 import { SlideCanvas } from './components/SlideCanvas'
 import { SlideGallery } from './components/SlideGallery'
 import {
+  deleteSandboxPresentation,
   listSandboxPresentations,
   sendPresentationTranscript,
   startPresentation,
@@ -190,6 +191,44 @@ function AppContent(): React.JSX.Element {
   }, [currentSlide, sessionId, doclingStatus, setSlideData])
 
   useEffect(() => {
+    if (!sessionId || doclingStatus !== 'pending') {
+      return
+    }
+
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      void window.electronAPI
+        .getParseStatus(sessionId)
+        .then(async (status) => {
+          if (cancelled || status.doclingStatus === 'pending') {
+            return
+          }
+
+          setDoclingStatus(status.doclingStatus)
+          if (status.doclingStatus === 'ready') {
+            const data = await window.electronAPI.getSlideData(sessionId, currentSlide)
+            if (!cancelled) {
+              setSlideData(currentSlide, data)
+              setStatusMessage('Structured slide data is ready.')
+            }
+          } else {
+            setStatusMessage('Structured slide parsing failed.')
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            setStatusMessage(`Parse status unavailable: ${getErrorMessage(error)}`)
+          }
+        })
+    }, 750)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [currentSlide, doclingStatus, sessionId, setDoclingStatus, setSlideData])
+
+  useEffect(() => {
     if (mode !== 'live' || !presentationId) {
       return
     }
@@ -250,6 +289,15 @@ function AppContent(): React.JSX.Element {
   }
 
   const handleClearSession = async (selectedSessionId: string): Promise<void> => {
+    const session = recentSessions.find((entry) => entry.sessionId === selectedSessionId)
+    if (session) {
+      try {
+        await deleteSandboxPresentation(session.fileName)
+      } catch (error) {
+        setStatusMessage(`Sandbox delete failed: ${getErrorMessage(error)}`)
+      }
+    }
+
     await window.electronAPI.clearSession(selectedSessionId)
     await loadRecentSessions()
 

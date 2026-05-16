@@ -43,8 +43,8 @@ app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.electron')
 
   protocol.handle('nemostage-media', (request) => {
-    const raw = request.url.replace('nemostage-media://', '')
-    const filePath = decodeURIComponent(raw)
+    const parsed = new URL(request.url)
+    const filePath = decodeURIComponent(parsed.pathname)
     // Windows paths need file:///C:/... (forward slashes, extra leading slash)
     const normalized = filePath.replace(/\\/g, '/')
     const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`

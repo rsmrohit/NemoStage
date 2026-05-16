@@ -73,6 +73,19 @@ async function postJson<TResponse>(path: string, payload: unknown): Promise<TRes
   return response.json() as Promise<TResponse>
 }
 
+async function deleteJson<TResponse>(path: string): Promise<TResponse> {
+  const response = await fetch(`${NEMOSTAGE_BACKEND_URL}${path}`, {
+    method: 'DELETE'
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(text || `NemoStage backend request failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<TResponse>
+}
+
 export function startPresentation(payload: StartPresentationPayload): Promise<{
   status: string
   presentation_id: string
@@ -102,6 +115,14 @@ export function sendPresentationTranscript(
 
 export function listSandboxPresentations(): Promise<{ presentations: SandboxPresentation[] }> {
   return getJson('/presentations')
+}
+
+export function deleteSandboxPresentation(filename: string): Promise<{
+  status: string
+  deleted: string
+  sandbox_path: string
+}> {
+  return deleteJson(`/presentations/${encodeURIComponent(filename)}`)
 }
 
 export function summarizeSlideData(slideIndex: number, data: SlideData | null): PresentationSlidePayload {

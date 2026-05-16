@@ -73,6 +73,10 @@ export interface ElectronAPI {
   extractPPTX: (filePath: string) => Promise<ExtractionResult>
   getSlideImage: (sessionId: string, slideIndex: number) => Promise<string | null>
   getSlideData: (sessionId: string, slideIndex: number) => Promise<SlideData>
+  getParseStatus: (sessionId: string) => Promise<{
+    doclingStatus: 'pending' | 'ready' | 'failed'
+    hasManifest: boolean
+  }>
   getRecentSessions: () => Promise<SessionMetadata[]>
   resumeSession: (sessionId: string) => Promise<ExtractionResult>
   updateSessionState: (sessionId: string, currentSlide: number) => Promise<boolean>

@@ -8,6 +8,7 @@ const electronAPI: ElectronAPI = {
   extractPPTX: (filePath) => ipcRenderer.invoke('pptx:extract', filePath),
   getSlideImage: (sessionId, index) => ipcRenderer.invoke('pptx:getImage', sessionId, index),
   getSlideData: (sessionId, index) => ipcRenderer.invoke('pptx:getData', sessionId, index),
+  getParseStatus: (sessionId) => ipcRenderer.invoke('pptx:getParseStatus', sessionId),
   getRecentSessions: () => ipcRenderer.invoke('pptx:getRecentSessions'),
   resumeSession: (sessionId) => ipcRenderer.invoke('pptx:resumeSession', sessionId),
   updateSessionState: (sessionId, currentSlide) =>

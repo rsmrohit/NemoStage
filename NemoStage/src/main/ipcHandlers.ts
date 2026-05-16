@@ -35,7 +35,8 @@ function emitToRenderer(window: BrowserWindow | null, channel: string, payload: 
 }
 
 function toFileUrl(absolutePath: string): string {
-  return `nemostage-media://${absolutePath}`
+  const normalized = absolutePath.replace(/\\/g, '/')
+  return `nemostage-media:///${encodeURI(normalized)}`
 }
 
 async function validatePptxFile(filePath: string): Promise<string[]> {
@@ -342,6 +343,18 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       background: slide.background,
       slideWidth: manifest.slideWidth,
       slideHeight: manifest.slideHeight
+    }
+  })
+
+  ipcMain.handle('pptx:getParseStatus', async (_event, sessionId: string) => {
+    const runtime = sessions.get(sessionId) ?? (await hydrateSessionFromDisk(sessionId))
+    if (!runtime) {
+      throw new Error('Session not found')
+    }
+
+    return {
+      doclingStatus: runtime.result.doclingStatus,
+      hasManifest: doclingManifests.has(sessionId) || (await fs.pathExists(runtime.manifestPath))
     }
   })
 
