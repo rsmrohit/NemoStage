@@ -486,6 +486,18 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
     await writeSessionMetadata(metadata)
 
+    // Clean up any old local sessions for the same filename so they can't ghost-reappear later
+    const allSessions = await listRecentSessions(20)
+    await Promise.all(
+      allSessions
+        .filter((s) => s.fileName === metadata.fileName && s.sessionId !== sessionId)
+        .map(async (s) => {
+          await clearSession(s.sessionId)
+          sessions.delete(s.sessionId)
+          doclingManifests.delete(s.sessionId)
+        })
+    )
+
     const result: ExtractionResult = {
       sessionId,
       filePath,

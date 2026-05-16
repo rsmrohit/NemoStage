@@ -13,6 +13,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -31,6 +32,27 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Patterns that suggest the speaker is asking a question or requesting something
+# that warrants immediate analysis rather than waiting for the batch timer.
+_INTENT_RE = re.compile(
+    r'\b('
+    r'(what|how|why|where|when|which|who)\s+(is|are|does|do|did|was|were|can|could|should|would|about)\b'
+    r'|(can|could|would|should)\s+(we|you|i)\b'
+    r'|(pull\s+up|show\s+(me|us)|go\s+to|switch\s+to|bring\s+up)'
+    r'|(let.?s\s+(look|see)|take\s+a\s+look)'
+    r'|(next\s+slide|previous\s+slide|last\s+slide)'
+    r'|(explain|tell\s+me|walk\s+(me|us)\s+through)'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def detect_question_intent(text: str) -> bool:
+    if text.rstrip().endswith("?"):
+        return True
+    return bool(_INTENT_RE.search(text))
+
 
 # Optional noise reduction package (used only if requested via env var and installed)
 try:
@@ -350,8 +372,11 @@ async def process_segment(session_id: str, segment_bytes: bytes) -> None:
 
     segment_index += 1
     full_transcript = f"{full_transcript} {transcript_text}".strip()
+    intent = detect_question_intent(transcript_text)
+    if intent:
+        logger.info("Question intent detected in segment %s: %r", segment_index + 1, transcript_text[:80])
     event = make_transcript_event(transcript_text, speaker=speaker)
-    payload = event.to_dict() | {"session_id": session_id}
+    payload = event.to_dict() | {"session_id": session_id, "intent": intent}
 
     await broadcast_payload(payload)
     save_transcript_to_json(payload, session_id)

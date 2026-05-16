@@ -45,6 +45,7 @@ interface TranscriptFileEvent {
   session_id?: string
   error?: string
   transcript_file?: string
+  intent?: boolean
 }
 
 function getTranscriptEventKey(event: TranscriptFileEvent): string {
@@ -205,7 +206,15 @@ function AppContent(): React.JSX.Element {
       const sandboxFilenames = new Set(
         sandbox.presentations.map((presentation) => presentation.filename)
       )
-      setRecentSessions(sessions.filter((session) => sandboxFilenames.has(session.fileName)))
+      // sessions is sorted by lastAccessed desc; keep only the most recent session per filename
+      const seen = new Set<string>()
+      const deduplicated = sessions.filter((session) => {
+        if (!sandboxFilenames.has(session.fileName)) return false
+        if (seen.has(session.fileName)) return false
+        seen.add(session.fileName)
+        return true
+      })
+      setRecentSessions(deduplicated)
     } catch (error) {
       setRecentSessions([])
       setStatusMessage(`Sandbox presentations unavailable: ${getErrorMessage(error)}`)
@@ -505,7 +514,7 @@ function AppContent(): React.JSX.Element {
     })
   }, [])
 
-    const addToTranscriptBuffer = useCallback((text: string): void => {
+    const addToTranscriptBuffer = useCallback((text: string, intent?: boolean): void => {
     const trimmedText = text.trim()
     if (!trimmedText) {
       return
@@ -513,7 +522,17 @@ function AppContent(): React.JSX.Element {
 
     setTranscriptBuffer((prev) => [...prev, trimmedText])
 
-    // Only start the timer if one isn't already running — don't reset on each event
+    if (intent) {
+      console.log('[transcript] Intent detected — flushing immediately')
+      if (batchTimerRef.current) {
+        clearTimeout(batchTimerRef.current)
+        batchTimerRef.current = null
+      }
+      void flushTranscriptBuffer()
+      return
+    }
+
+    // No intent — start fallback batch timer if one isn't already running
     if (batchTimerRef.current) {
       return
     }
@@ -628,7 +647,7 @@ function AppContent(): React.JSX.Element {
       }
 
       processedTranscriptEventRef.current = eventKey
-      addToTranscriptBuffer(transcriptEvent.text) // Changed from analyzeTranscriptChunk
+      addToTranscriptBuffer(transcriptEvent.text, transcriptEvent.intent)
     })
 
     const unsubscribeTranscriptStatus = window.electronAPI.onTranscriptStatus((status) => {

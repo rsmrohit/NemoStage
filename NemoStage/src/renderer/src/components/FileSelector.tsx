@@ -107,7 +107,7 @@ export function FileSelector({ onSelect }: FileSelectorProps): React.JSX.Element
       <h1>NemoStage</h1>
       <p className="subtitle">Live Presentation Co-Pilot</p>
 
-      <button className="primary" onClick={handleSelect} type="button">
+      <button className="primary" onClick={handleSelect} type="button" style={{"width": "100%"}}>
         Select PPTX
       </button>
 
