@@ -58,7 +58,7 @@ WHISPER_CPP_BIN = Path(
 WHISPER_MODEL = Path(
     os.getenv(
         "WHISPER_MODEL",
-        APP_ROOT / "whisper.cpp" / "models" / "ggml-large-v3-turbo.bin",
+        APP_ROOT / "whisper.cpp" / "models" / "ggml-small.en-tdrz.bin",
     )
 )
 WHISPER_LANG = os.getenv("WHISPER_LANG", "en")
@@ -102,6 +102,7 @@ class TranscriptEvent:
     timestamp: str
     segment_index: int
     source: str = "whisper.cpp"
+    speaker: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +112,7 @@ class TranscriptEvent:
             "timestamp": self.timestamp,
             "segment_index": self.segment_index,
             "source": self.source,
+            "speaker": self.speaker,
         }
 
 
@@ -137,7 +139,11 @@ def build_wav_bytes(pcm_bytes: bytes) -> bytes:
     return buffer.getvalue()
 
 
-def transcribe_with_whisper_cpp(wav_bytes: bytes) -> str:
+def transcribe_with_whisper_cpp(wav_bytes: bytes) -> dict[str, Any]:
+    """Transcribe WAV bytes and extract speaker info from TDRZ output.
+    
+    Returns a dict with 'text' (transcript) and 'speaker' (speaker label if detected).
+    """
     if not WHISPER_CPP_BIN.exists():
         raise FileNotFoundError(f"whisper.cpp binary not found: {WHISPER_CPP_BIN}")
     if not WHISPER_MODEL.exists():
@@ -177,24 +183,48 @@ def transcribe_with_whisper_cpp(wav_bytes: bytes) -> str:
         except Exception:
             logger.debug("Failed to write whisper-cli diagnostics log")
 
+        # Parse transcript and speaker labels from output
+        # TDRZ format: [Speaker X] followed by text
         transcript_lines = []
+        current_speaker = None
+        
         for line in completed.stdout.splitlines():
-            if "]" in line:
+            if "[Speaker" in line:
+                # Extract speaker label (e.g., "[Speaker 0]" -> "Speaker 0")
+                speaker_start = line.find("[Speaker")
+                speaker_end = line.find("]", speaker_start)
+                if speaker_end > speaker_start:
+                    current_speaker = line[speaker_start + 1 : speaker_end]
+                # Get text after speaker label
+                text_part = line[speaker_end + 1:].strip() if speaker_end > 0 else ""
+                if text_part:
+                    transcript_lines.append(text_part)
+            elif "]" in line:
+                # Fallback for other bracketed content
                 transcript_lines.append(line.split("]", 1)[-1].strip())
+            elif line.strip():
+                transcript_lines.append(line.strip())
 
         transcript = " ".join(part for part in transcript_lines if part)
-        return transcript or completed.stdout.strip() or completed.stderr.strip()
+        if not transcript:
+            transcript = completed.stdout.strip() or completed.stderr.strip()
+
+        return {
+            "text": transcript,
+            "speaker": current_speaker,
+        }
     finally:
         tmp_wav_path.unlink(missing_ok=True)
 
 
-def make_transcript_event(text: str, event_type: str = "final") -> TranscriptEvent:
+def make_transcript_event(text: str, event_type: str = "final", speaker: Optional[str] = None) -> TranscriptEvent:
     return TranscriptEvent(
         type=event_type,
         text=text,
         full_transcript=full_transcript,
         timestamp=datetime.now().isoformat(),
         segment_index=segment_index,
+        speaker=speaker,
     )
 
 
@@ -300,7 +330,7 @@ async def process_segment(session_id: str, segment_bytes: bytes) -> None:
         logger.debug("Failed to save diagnostic WAV for segment %s", segment_index + 1)
 
     try:
-        transcript_text = await asyncio.to_thread(transcribe_with_whisper_cpp, wav_bytes)
+        result = await asyncio.to_thread(transcribe_with_whisper_cpp, wav_bytes)
     except Exception as exc:
         error_event = {
             "type": "error",
@@ -312,13 +342,15 @@ async def process_segment(session_id: str, segment_bytes: bytes) -> None:
         save_transcript_to_json(error_event, session_id)
         return
 
-    transcript_text = transcript_text.strip()
+    transcript_text = result["text"].strip()
+    speaker = result.get("speaker")
+    
     if not transcript_text:
         return
 
     segment_index += 1
     full_transcript = f"{full_transcript} {transcript_text}".strip()
-    event = make_transcript_event(transcript_text)
+    event = make_transcript_event(transcript_text, speaker=speaker)
     payload = event.to_dict() | {"session_id": session_id}
 
     await broadcast_payload(payload)
