@@ -1,1 +1,0 @@
-/Users/shiva/Documents/NemoStage/backend/transcript/backend/transcript/whisper.cpp
