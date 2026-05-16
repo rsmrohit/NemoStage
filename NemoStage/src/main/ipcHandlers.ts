@@ -25,6 +25,7 @@ import {
 } from './services/workspaceManager'
 
 import { parsePPTXStructure } from './services/pptxXmlParser'
+import { downloadGoogleFonts } from './services/googleFontsDownloader'
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
@@ -319,7 +320,10 @@ function startStructureParse(
       if (current) {
         current.result.doclingStatus = 'ready'
       }
-      emitToRenderer(getMainWindow(), 'pptx:doclingReady', { sessionId: runtime.sessionId })
+      emitToRenderer(getMainWindow(), 'pptx:doclingReady', {
+        sessionId: runtime.sessionId,
+        googleFontNames: doclingManifests.get(runtime.sessionId)?.googleFontNames ?? []
+      })
     })
     .catch((error) => {
       const current = sessions.get(runtime.sessionId)
@@ -557,8 +561,34 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
     return {
       doclingStatus: runtime.result.doclingStatus,
-      hasManifest: doclingManifests.has(sessionId) || (await fs.pathExists(runtime.manifestPath))
+      hasManifest: doclingManifests.has(sessionId) || (await fs.pathExists(runtime.manifestPath)),
+      googleFontNames: doclingManifests.get(sessionId)?.googleFontNames ?? []
     }
+  })
+
+  ipcMain.handle('pptx:downloadGoogleFonts', async (_event, sessionId: string) => {
+    const manifest = doclingManifests.get(sessionId)
+    const names = manifest?.googleFontNames ?? []
+    if (!names.length) return []
+    console.log(`[pptx:downloadGoogleFonts] Downloading ${names.length} fonts for session ${sessionId}:`, names)
+    return downloadGoogleFonts(names)
+  })
+
+  ipcMain.handle('pptx:getSessionFonts', async (_event, sessionId: string) => {
+    const manifest = doclingManifests.get(sessionId)
+    console.log(`[pptx:getSessionFonts] sessionId=${sessionId} | manifest found=${!!manifest} | embeddedFonts count=${manifest?.embeddedFonts?.length ?? 0}`)
+    if (!manifest?.embeddedFonts?.length) return []
+    const entries = manifest.embeddedFonts.map((font) => ({
+      name: font.name,
+      url: toFileUrl(font.path),
+      boldUrl: font.bold ? toFileUrl(font.bold) : undefined,
+      italicUrl: font.italic ? toFileUrl(font.italic) : undefined,
+      boldItalicUrl: font.boldItalic ? toFileUrl(font.boldItalic) : undefined
+    }))
+    console.log('[pptx:getSessionFonts] Returning font entries:', entries.map(e =>
+      `${e.name} [regular${e.boldUrl ? ' bold' : ''}${e.italicUrl ? ' italic' : ''}${e.boldItalicUrl ? ' boldItalic' : ''}]`
+    ))
+    return entries
   })
 
   ipcMain.handle('pptx:getRecentSessions', async () => listRecentSessions(5))

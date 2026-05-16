@@ -250,11 +250,30 @@ export interface SlideManifestEntry {
   imagePaths: string[]
 }
 
+export interface EmbeddedFont {
+  name: string
+  path: string       // absolute fs path to the regular/default variant
+  bold?: string      // absolute fs path to bold variant
+  italic?: string
+  boldItalic?: string
+  needsWebFont?: boolean  // true when obfuscated with no GUID — file is unusable
+}
+
+export interface EmbeddedFontEntry {
+  name: string
+  url: string        // nemostage-media:// URL
+  boldUrl?: string
+  italicUrl?: string
+  boldItalicUrl?: string
+}
+
 export interface PptxManifest {
   slideCount: number
   slideWidth: number // In EMUs
   slideHeight: number // In EMUs
   slides: PptxSlide[]
+  embeddedFonts?: EmbeddedFont[]
+  googleFontNames?: string[]  // font names that need Google Fonts download (obfuscated, no GUID)
 }
 
 export interface PptxSlide {

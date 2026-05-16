@@ -2,7 +2,7 @@ import PizZip from 'pizzip'
 import { parseStringPromise } from 'xml2js'
 import fs from 'fs-extra'
 import path from 'path'
-import type { PptxManifest, PptxSlide, PptxElement, PptxTableCell, PptxTableRow, TextRun, ImageCrop } from '../types'
+import type { PptxManifest, PptxSlide, PptxElement, PptxTableCell, PptxTableRow, TextRun, ImageCrop, EmbeddedFont } from '../types'
 
 // OOXML scheme color aliases (bg1/tx1 etc. map to canonical lt1/dk1 etc.)
 const SCHEME_ALIAS: Record<string, string> = {
@@ -30,7 +30,10 @@ export async function parsePPTXStructure(
   console.log('[pptxXmlParser] Theme colors loaded:', themeColors.size)
   console.log('[pptxXmlParser] Master background:', masterBg)
 
-  const imagePathMap = await extractImagesToMedia(zip, sessionDir)
+  const [imagePathMap, { fonts: embeddedFonts, googleFontNames }] = await Promise.all([
+    extractImagesToMedia(zip, sessionDir),
+    extractEmbeddedFonts(zip, sessionDir)
+  ])
 
   const slides: PptxSlide[] = []
   let slideNum = 1
@@ -55,7 +58,7 @@ export async function parsePPTXStructure(
 
   console.log(`[pptxXmlParser] Parsed ${slides.length} slides`)
 
-  return { slideCount: slides.length, slideWidth, slideHeight, slides }
+  return { slideCount: slides.length, slideWidth, slideHeight, slides, embeddedFonts, googleFontNames }
 }
 
 // ─── Slide dimensions ───────────────────────────────────────────────────────
@@ -709,6 +712,198 @@ async function extractImagesToMedia(
   }
 
   return imagePathMap
+}
+
+// ─── Embedded font extraction ─────────────────────────────────────────────────
+
+function isValidFontMagic(data: Buffer): boolean {
+  if (data.length < 4) return false
+  const sig = data.readUInt32BE(0)
+  // TrueType 1.0, OpenType CFF (OTTO), TrueType 'true', WOFF, WOFF2
+  return (
+    sig === 0x00010000 ||
+    sig === 0x4f54544f ||
+    sig === 0x74727565 ||
+    sig === 0x774f4646 ||
+    sig === 0x774f4632
+  )
+}
+
+function deobfuscateOdttf(data: Buffer, guid: string): Buffer {
+  const hex = guid.replace(/[{}\-]/g, '')
+  if (hex.length !== 32) return data
+  const key = Buffer.from(hex, 'hex')
+  key.reverse()
+  const result = Buffer.from(data)
+  for (let i = 0; i < 32 && i < result.length; i++) {
+    result[i] ^= key[i % 16]
+  }
+  return result
+}
+
+function guidFromFilename(target: string): string | null {
+  const base = path.basename(target, path.extname(target))
+  return /^\{[0-9A-Fa-f-]{36}\}$/.test(base) ? base : null
+}
+
+function fontGuidFromElement(fontEl: any): string | null {
+  // Try both p: and a: namespace prefixes for extLst
+  const extLst = fontEl['p:extLst']?.[0] ?? fontEl['a:extLst']?.[0]
+  const exts: any[] = extLst?.['p:ext'] ?? extLst?.['a:ext'] ?? []
+
+  if (exts.length === 0 && !extLst) {
+    console.log('[fonts] fontGuidFromElement: no extLst found — element keys:', Object.keys(fontEl))
+  } else if (exts.length === 0) {
+    console.log('[fonts] fontGuidFromElement: extLst found but no ext children — extLst keys:', Object.keys(extLst))
+  }
+
+  for (const ext of exts) {
+    console.log('[fonts] fontGuidFromElement: ext keys:', Object.keys(ext))
+    for (const key of Object.keys(ext)) {
+      if (key.toLowerCase().includes('fontkey')) {
+        const val = ext[key]?.[0]?.$?.val as string | undefined
+        console.log(`[fonts] fontGuidFromElement: found fontKey element "${key}" val=${val}`)
+        if (val?.startsWith('{')) return val
+      }
+    }
+  }
+  return null
+}
+
+async function extractFontVariant(
+  zip: PizZip,
+  target: string,
+  fontsDir: string,
+  baseName: string,
+  variant: string,
+  guid: string | null
+): Promise<{ path: string | null; needsWebFont: boolean }> {
+  const zipPath = target.startsWith('../')
+    ? `ppt/${target.slice(3)}`
+    : target.startsWith('fonts/')
+      ? `ppt/${target}`
+      : `ppt/fonts/${path.basename(target)}`
+
+  console.log(`[fonts] extractFontVariant: "${baseName}" ${variant} → zip path "${zipPath}"`)
+
+  const file = zip.file(zipPath)
+  if (!file) {
+    console.warn(`[fonts] ❌ Not found in zip: "${zipPath}"`)
+    return { path: null, needsWebFont: false }
+  }
+
+  let data = file.asNodeBuffer()
+  const ext = path.extname(target).toLowerCase()
+  const mightBeObfuscated = ext === '.odttf' || ext === '.fntdata'
+  let needsWebFont = false
+
+  if (mightBeObfuscated) {
+    const isAlreadyValidFont = isValidFontMagic(data)
+    const firstBytes = data.subarray(0, 8).toString('hex').match(/../g)?.join(' ') ?? ''
+    if (isAlreadyValidFont) {
+      console.log(`[fonts] "${zipPath}" has valid font header — plain font, no de-obfuscation needed`)
+    } else {
+      const key = guid ?? guidFromFilename(target)
+      console.log(`[fonts] "${zipPath}" first bytes: ${firstBytes} — ${key ? 'de-obfuscating' : 'no GUID, needs web font'}`)
+      if (key) {
+        data = deobfuscateOdttf(data, key)
+      } else {
+        needsWebFont = true
+        console.warn(`[fonts] ⚠️ "${zipPath}" obfuscated with no GUID — will need Google Fonts fallback`)
+      }
+    }
+  }
+
+  const safe = baseName.replace(/[^a-zA-Z0-9]/g, '_')
+  const outPath = path.join(fontsDir, `${safe}_${variant}.ttf`)
+  await fs.writeFile(outPath, data)
+  console.log(`[fonts] ✅ Saved ${variant} → ${outPath} (${data.length} bytes)`)
+  return { path: outPath, needsWebFont }
+}
+
+async function extractEmbeddedFonts(
+  zip: PizZip,
+  sessionDir: string
+): Promise<{ fonts: EmbeddedFont[]; googleFontNames: string[] }> {
+  const presFile = zip.file('ppt/presentation.xml')
+  const presRelsFile = zip.file('ppt/_rels/presentation.xml.rels')
+  if (!presFile || !presRelsFile) return { fonts: [], googleFontNames: [] }
+
+  try {
+    const [presXml, relsXml] = await Promise.all([
+      parseStringPromise(presFile.asText()),
+      parseStringPromise(presRelsFile.asText())
+    ])
+
+    const relMap = new Map<string, string>()
+    for (const rel of (relsXml['Relationships']?.['Relationship'] || [])) {
+      if ((rel.$.Type as string)?.includes('font')) {
+        relMap.set(rel.$.Id as string, rel.$.Target as string)
+      }
+    }
+
+    const fontList: any[] =
+      presXml['p:presentation']?.['p:embeddedFontLst']?.[0]?.['p:embeddedFont'] || []
+
+    if (fontList.length === 0) return { fonts: [], googleFontNames: [] }
+
+    const fontsDir = path.join(sessionDir, 'fonts')
+    await fs.ensureDir(fontsDir)
+
+    const results: EmbeddedFont[] = []
+    const googleFontNames: string[] = []
+
+    console.log(`[fonts] Found ${fontList.length} embedded font entries in presentation.xml`)
+    console.log(`[fonts] Font relationship map has ${relMap.size} font entries`)
+
+    for (const fontEl of fontList) {
+      const fontName = fontEl['p:font']?.[0]?.$?.typeface as string | undefined
+      if (!fontName) continue
+
+      const guid = fontGuidFromElement(fontEl)
+
+      const regularId = fontEl['p:regular']?.[0]?.$?.['r:id'] as string | undefined
+      const boldId = fontEl['p:bold']?.[0]?.$?.['r:id'] as string | undefined
+      const italicId = fontEl['p:italic']?.[0]?.$?.['r:id'] as string | undefined
+      const boldItalicId = fontEl['p:boldItalic']?.[0]?.$?.['r:id'] as string | undefined
+
+      console.log(`[fonts] Processing font: "${fontName}" | guid=${guid ?? 'none'} | ids: regular=${regularId} bold=${boldId} italic=${italicId} boldItalic=${boldItalicId}`)
+
+      const regularTarget = regularId ? relMap.get(regularId) : undefined
+      console.log(`[fonts] Regular target for "${fontName}": ${regularTarget ?? '(not found)'}`)
+      if (!regularTarget) continue
+
+      const regular = await extractFontVariant(zip, regularTarget, fontsDir, fontName, 'regular', guid)
+      if (!regular.path) continue
+
+      const font: EmbeddedFont = { name: fontName, path: regular.path, needsWebFont: regular.needsWebFont }
+      if (regular.needsWebFont) googleFontNames.push(fontName)
+
+      const boldTarget = boldId ? relMap.get(boldId) : undefined
+      if (boldTarget) {
+        const bold = await extractFontVariant(zip, boldTarget, fontsDir, fontName, 'bold', guid)
+        font.bold = bold.path ?? undefined
+      }
+      const italicTarget = italicId ? relMap.get(italicId) : undefined
+      if (italicTarget) {
+        const italic = await extractFontVariant(zip, italicTarget, fontsDir, fontName, 'italic', guid)
+        font.italic = italic.path ?? undefined
+      }
+      const boldItalicTarget = boldItalicId ? relMap.get(boldItalicId) : undefined
+      if (boldItalicTarget) {
+        const boldItalic = await extractFontVariant(zip, boldItalicTarget, fontsDir, fontName, 'boldItalic', guid)
+        font.boldItalic = boldItalic.path ?? undefined
+      }
+
+      results.push(font)
+    }
+
+    console.log(`[pptxXmlParser] Extracted ${results.length} embedded fonts, ${googleFontNames.length} need Google Fonts`)
+    return { fonts: results, googleFontNames }
+  } catch (e) {
+    console.warn('[pptxXmlParser] Font extraction failed:', e)
+    return { fonts: [], googleFontNames: [] }
+  }
 }
 
 // ─── Speaker notes ────────────────────────────────────────────────────────────

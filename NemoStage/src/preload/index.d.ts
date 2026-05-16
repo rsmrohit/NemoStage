@@ -91,6 +91,14 @@ export interface SandboxUploadResult {
   vectorization_error?: string | null
 }
 
+export interface EmbeddedFontEntry {
+  name: string
+  url: string
+  boldUrl?: string
+  italicUrl?: string
+  boldItalicUrl?: string
+}
+
 export interface ElectronAPI {
   selectPPTX: () => Promise<string | null>
   getFileStats: (filePath: string) => Promise<{ size: number; mtimeMs: number } | null>
@@ -98,10 +106,13 @@ export interface ElectronAPI {
   extractPPTX: (filePath: string) => Promise<ExtractionResult>
   getSlideImage: (sessionId: string, slideIndex: number) => Promise<string | null>
   getSlideData: (sessionId: string, slideIndex: number) => Promise<SlideData>
+  getSessionFonts: (sessionId: string) => Promise<EmbeddedFontEntry[]>
   getParseStatus: (sessionId: string) => Promise<{
     doclingStatus: 'pending' | 'ready' | 'failed'
     hasManifest: boolean
+    googleFontNames: string[]
   }>
+  downloadGoogleFonts: (sessionId: string) => Promise<EmbeddedFontEntry[]>
   getRecentSessions: () => Promise<SessionMetadata[]>
   resumeSession: (sessionId: string) => Promise<ExtractionResult>
   updateSessionState: (sessionId: string, currentSlide: number) => Promise<boolean>
@@ -109,7 +120,7 @@ export interface ElectronAPI {
   startTranscriptListener: () => Promise<TranscriptListenerStatus>
   stopTranscriptListener: () => Promise<TranscriptListenerStatus>
   onExtractionProgress: (callback: (event: ExtractionProgressEvent) => void) => () => void
-  onDoclingReady: (callback: (event: { sessionId: string }) => void) => () => void
+  onDoclingReady: (callback: (event: { sessionId: string; googleFontNames: string[] }) => void) => () => void
   onDoclingError: (callback: (event: { sessionId: string; message: string }) => void) => () => void
   onTranscriptUpdate: (callback: (event: TranscriptEvent) => void) => () => void
   onTranscriptStatus: (callback: (event: TranscriptListenerStatus) => void) => () => void

@@ -12,6 +12,7 @@ interface SlideCanvasProps {
   currentSlide: number
   slideData: SlideData | null
   slideImage: string | null
+  fontsVersion?: number
 }
 
 function geomToBorderRadius(geom?: string): string | undefined {
@@ -58,7 +59,8 @@ function renderElement(el: DoclingElement, key: string, slideWidth: number, slid
 export const SlideCanvas = memo(function SlideCanvas({
   currentSlide,
   slideData,
-  slideImage
+  slideImage,
+  fontsVersion: _fontsVersion
 }: SlideCanvasProps): React.JSX.Element {
   const slideWidth = slideData?.slideWidth ?? DEFAULT_SLIDE_WIDTH
   const slideHeight = slideData?.slideHeight ?? DEFAULT_SLIDE_HEIGHT

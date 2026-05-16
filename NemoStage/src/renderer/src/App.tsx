@@ -17,6 +17,7 @@ import {
 import type { VectorizationFields } from './services/nemostageApi'
 import { usePresentationStore } from './store/presentationStore'
 import type { ExtractionPhase, SessionMetadata, SlideData } from './types/presentation'
+import { useFonts } from './hooks/useFonts'
 
 type AppMode = 'select' | 'gallery' | 'live'
 type LiveAgentStatus =
@@ -84,8 +85,13 @@ function AppContent(): React.JSX.Element {
   const [isSlideFullscreen, setIsSlideFullscreen] = useState(false)
   const isSlideFullscreenRef = useRef(false)
   const slideContainerRef = useRef<HTMLDivElement>(null)
+  const sessionIdRef = useRef<string | null>(sessionId)
+  useEffect(() => { sessionIdRef.current = sessionId }, [sessionId])
   const [statusMessage, setStatusMessage] = useState('')
   const [extractionPhase, setExtractionPhase] = useState<ExtractionPhase>('idle')
+  const [googleFontNames, setGoogleFontNames] = useState<string[]>([])
+  const [fontDownloadState, setFontDownloadState] = useState<'idle' | 'downloading' | 'done' | 'error'>('idle')
+  const { fontsVersion, loadFonts, clearFonts } = useFonts()
   const [progress, setProgress] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([])
@@ -152,14 +158,26 @@ function AppContent(): React.JSX.Element {
     })
 
     const unsubscribeDoclingReady = window.electronAPI.onDoclingReady(
-      async ({ sessionId: readySessionId }) => {
-        if (readySessionId !== sessionId) {
+      async ({ sessionId: readySessionId, googleFontNames: gfNames }) => {
+        const currentSessionId = sessionIdRef.current
+        console.log(`[fonts] onDoclingReady: readySessionId=${readySessionId} currentSessionId=${currentSessionId} match=${readySessionId === currentSessionId}`)
+        if (readySessionId !== currentSessionId) {
           return
         }
 
         setDoclingStatus('ready')
-        const data = await window.electronAPI.getSlideData(readySessionId, currentSlide)
+        if (gfNames.length > 0) {
+          setGoogleFontNames(gfNames)
+          setFontDownloadState('idle')
+        }
+        console.log('[fonts] onDoclingReady fired for session', readySessionId, '— fetching slide data + fonts')
+        const [data, fonts] = await Promise.all([
+          window.electronAPI.getSlideData(readySessionId, currentSlide),
+          window.electronAPI.getSessionFonts(readySessionId)
+        ])
+        console.log('[fonts] getSessionFonts returned', fonts.length, 'fonts from IPC')
         setSlideData(currentSlide, data)
+        void loadFonts(fonts, 'truetype')
         setStatusMessage('Structured slide data is ready.')
         setExtractionPhase('ready')
       }
@@ -277,9 +295,21 @@ function AppContent(): React.JSX.Element {
 
           setDoclingStatus(status.doclingStatus)
           if (status.doclingStatus === 'ready') {
-            const data = await window.electronAPI.getSlideData(sessionId, currentSlide)
+            // Set google font names NOW, before the await — cancelled becomes true
+            // during the await when React re-renders on setDoclingStatus
+            if (status.googleFontNames.length > 0) {
+              setGoogleFontNames(status.googleFontNames)
+              setFontDownloadState('idle')
+            }
+            console.log('[fonts] polling path: parse ready — fetching slide data + fonts')
+            const [data, fonts] = await Promise.all([
+              window.electronAPI.getSlideData(sessionId, currentSlide),
+              window.electronAPI.getSessionFonts(sessionId)
+            ])
+            console.log('[fonts] polling path: getSessionFonts returned', fonts.length, 'fonts')
             if (!cancelled) {
               setSlideData(currentSlide, data)
+              void loadFonts(fonts, 'truetype')
               setStatusMessage('Structured slide data is ready.')
             }
           } else {
@@ -471,6 +501,21 @@ function AppContent(): React.JSX.Element {
       setExtractionPhase('ready')
       setProgress(1)
       setVectorizationInfo(null)
+      if (result.doclingStatus === 'ready') {
+        console.log('[fonts] handleResumeSession: doclingStatus=ready, fetching fonts for session', selectedSessionId)
+        const [fonts, status] = await Promise.all([
+          window.electronAPI.getSessionFonts(selectedSessionId),
+          window.electronAPI.getParseStatus(selectedSessionId)
+        ])
+        console.log('[fonts] getSessionFonts returned', fonts.length, 'fonts from IPC (resume)')
+        void loadFonts(fonts, 'truetype')
+        if (status.googleFontNames.length > 0) {
+          setGoogleFontNames(status.googleFontNames)
+          setFontDownloadState('idle')
+        }
+      } else {
+        console.log('[fonts] handleResumeSession: doclingStatus=', result.doclingStatus, '— skipping font injection')
+      }
     } catch (error) {
       setErrorMessage((error as Error).message)
     }
@@ -498,9 +543,25 @@ function AppContent(): React.JSX.Element {
       setLiveAgentMessage('No transcript analyzed yet.')
       setSlideGenerationNeeded(false)
       setVectorizationInfo(null)
+      setGoogleFontNames([])
+      setFontDownloadState('idle')
+      clearFonts()
       setLatestTranscriptEvent(null)
       setRecording(false)
       setStatusMessage('Session cleared')
+    }
+  }
+
+  const handleDownloadFonts = async (): Promise<void> => {
+    if (!sessionId || fontDownloadState === 'downloading') return
+    setFontDownloadState('downloading')
+    try {
+      const fonts = await window.electronAPI.downloadGoogleFonts(sessionId)
+      await loadFonts(fonts, 'woff2')
+      setFontDownloadState('done')
+    } catch (e) {
+      console.error('[fonts] Google Fonts download failed:', e)
+      setFontDownloadState('error')
     }
   }
 
@@ -698,6 +759,23 @@ function AppContent(): React.JSX.Element {
         {warningText && <p className="warn-text">{warningText}</p>}
         {errorMessage && <p className="error-text">{errorMessage}</p>}
 
+        {googleFontNames.length > 0 && fontDownloadState !== 'done' && (
+          <div className="font-download-banner">
+            <span>
+              {fontDownloadState === 'error'
+                ? 'Font download failed.'
+                : `${googleFontNames.length} embedded font${googleFontNames.length > 1 ? 's' : ''} couldn't be decoded — download from Google Fonts for correct rendering.`}
+            </span>
+            <button
+              className="font-download-btn"
+              onClick={() => void handleDownloadFonts()}
+              disabled={fontDownloadState === 'downloading'}
+            >
+              {fontDownloadState === 'downloading' ? 'Downloading…' : 'Download Fonts'}
+            </button>
+          </div>
+        )}
+
         {mode === 'select' && <p className="placeholder-text">Select or drop a PPTX to begin.</p>}
 
         {mode === 'gallery' && (
@@ -783,6 +861,7 @@ function AppContent(): React.JSX.Element {
                       currentSlide={liveDeckSlideIndex}
                       slideData={liveSlideData}
                       slideImage={liveSlideImage}
+                      fontsVersion={fontsVersion}
                     />
                   )}
                   <button
