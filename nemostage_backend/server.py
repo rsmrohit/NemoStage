@@ -1881,6 +1881,24 @@ def delete_presentation(filename: str):
     return JSONResponse({"status": "ok", "deleted": filename, "sandbox_path": target})
 
 
+@app.on_event("startup")
+async def warm_brev_models() -> None:
+    async def _warm(url: str, model: str) -> None:
+        try:
+            await ask_ollama("hi", url, model, timeout=120)
+        except Exception:
+            pass
+
+    seen: set[tuple[str, str]] = set()
+    tasks = []
+    for entry in CLASSIFY_POOL + GENERATE_POOL:
+        if entry not in seen:
+            seen.add(entry)
+            tasks.append(asyncio.create_task(_warm(*entry)))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 @app.get("/status")
 def status():
     try:
