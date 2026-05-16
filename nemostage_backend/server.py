@@ -23,6 +23,7 @@ logging.basicConfig(
 log = logging.getLogger("nemostage")
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from template_parser import load_custom_templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -80,6 +81,7 @@ EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 VECTOR_TOP_K = 5
 VECTOR_RELEVANCE_DISTANCE_THRESHOLD = 0.45
 SLIDE_TEMPLATE_LIMIT = 3
+CUSTOM_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "slide_templates")
 SLIDE_TEMPLATE_MAX_TEXT_BOXES = 8
 DEFAULT_SLIDE_WIDTH_EMU = 9144000
 DEFAULT_SLIDE_HEIGHT_EMU = 6858000
@@ -89,6 +91,15 @@ _chroma_client = None
 
 generated_slides: dict[str, list[dict]] = {}
 pending_generation_topics: dict[str, set[str]] = {}
+_custom_templates: list[dict] | None = None
+
+
+def get_custom_templates() -> list[dict]:
+    global _custom_templates
+    if _custom_templates is None:
+        _custom_templates = load_custom_templates(CUSTOM_TEMPLATES_DIR)
+        print(f"[template_parser] Loaded {len(_custom_templates)} custom template(s) from {CUSTOM_TEMPLATES_DIR}")
+    return _custom_templates
 recent_qa: list[dict] = []
 
 _pool_lock = threading.Lock()
@@ -1269,6 +1280,8 @@ async def generate_slide_background(
         clean_boxes = deduplicate_overlapping_boxes(list(t.get("text_boxes") or []))
         if clean_boxes:
             templates.append({**t, "text_boxes": clean_boxes})
+    # Prepend curated custom templates (higher quality, always available)
+    templates = get_custom_templates() + templates
     template_choices = [
         {
             "id": template.get("id"),
@@ -1281,6 +1294,7 @@ async def generate_slide_background(
                 {
                     "id": box.get("id"),
                     "role": box.get("role"),
+                    "hint": box.get("hint"),
                     "x": box.get("x"),
                     "y": box.get("y"),
                     "w": box.get("w"),
@@ -1318,18 +1332,21 @@ async def generate_slide_background(
         f"Deck style: bg_color={style_spec.get('bg_color', '#1a1a2e')}, "
         f"accent_color={style_spec.get('accent_color', '#4f8ef7')}, "
         f"font_family={style_spec.get('font_family', 'Calibri')}\n\n"
-        "Templates extracted from the user's deck — choose the layout that best fits the content:\n"
+        "Available slide layout templates — choose the one whose description best fits the topic:\n"
         f"{json.dumps(template_choices, ensure_ascii=True)}\n\n"
         "Return EXACTLY one JSON object — no markdown, no explanation:\n"
         '{"template_id": "<id from templates above>", "title": "<6-10 word descriptive title>", '
-        '"text_boxes": [{"id": "<box id>", "text": "<3-5 bullet points as newline-separated lines using • as bullet char, each a complete informative sentence>"}], '
+        '"text_boxes": [{"id": "<box id>", "text": "<content for this box>"}], '
         '"bullets": ["<point 1, full sentence>", "<point 2, full sentence>", "<point 3, full sentence>", "<point 4, full sentence>"], '
         '"notes": "<2-3 sentence speaker notes covering key talking points>", '
         '"style_hint": {"bg": "<exact bg_color from chosen template>", "accent": "<accent_color>", "font": "<font_family>"}}\n'
-        "Rules: title box gets only the slide title. "
-        "Body boxes get 3-5 bullet points each as complete, informative sentences — do not write fragments. "
-        "Fill every body box; do not leave any box empty. "
-        "Match bg_color exactly from the chosen template — do not invent colors."
+        "Rules:\n"
+        "- Each text box has a 'hint' field describing what belongs there — use it to guide the content.\n"
+        "- title boxes get only the slide title (6-10 words).\n"
+        "- body and caption boxes get 3-5 complete, informative sentences or bullet points (using • as bullet char).\n"
+        "- Only include boxes with role 'title', 'body', or 'caption' in text_boxes — skip 'image' and 'chart' roles.\n"
+        "- Fill every title, body, and caption box — do not leave any empty.\n"
+        "- Match bg_color exactly from the chosen template — do not invent colors."
     )
 
     try:
@@ -1348,9 +1365,12 @@ async def generate_slide_background(
             text_boxes = []
         latest_session = presentation_sessions.get(presentation_id)
         insertion_slide = latest_session.current_slide if latest_session else after_slide
-        # Use ground-truth colors from the actual template, not the LLM's guess
+        # Custom templates use a placeholder bg — always override with deck color.
+        # Deck-extracted templates use their own bg as a fallback if the deck has none.
+        is_custom = selected_template and selected_template.get("source") == "custom"
+        template_bg = None if is_custom else (selected_template.get("bg_color") if selected_template else None)
         style_hint = {
-            "bg": (selected_template.get("bg_color") if selected_template else None) or style_spec.get("bg_color", "#1a1a2e"),
+            "bg": template_bg or style_spec.get("bg_color", "#1a1a2e"),
             "accent": style_spec.get("accent_color", "#4f8ef7"),
             "font": style_spec.get("font_family", "Calibri"),
         }

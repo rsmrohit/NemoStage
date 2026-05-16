@@ -55,6 +55,60 @@ export function GeneratedSlideCard({ slide }: Props) {
             bulletIndex += 1
           }
 
+          if (box.role === 'image') {
+            return (
+              <div
+                key={box.id}
+                style={{
+                  position: 'absolute',
+                  left: `${box.x * 100}%`,
+                  top: `${box.y * 100}%`,
+                  width: `${box.w * 100}%`,
+                  height: `${box.h * 100}%`,
+                  boxSizing: 'border-box',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: `1px dashed rgba(255,255,255,0.2)`,
+                  borderRadius: 4,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'rgba(255,255,255,0.3)',
+                  fontSize: '0.7rem',
+                  fontStyle: 'italic',
+                }}
+              >
+                image
+              </div>
+            )
+          }
+
+          if (box.role === 'chart') {
+            return (
+              <div
+                key={box.id}
+                style={{
+                  position: 'absolute',
+                  left: `${box.x * 100}%`,
+                  top: `${box.y * 100}%`,
+                  width: `${box.w * 100}%`,
+                  height: `${box.h * 100}%`,
+                  boxSizing: 'border-box',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: `1px dashed rgba(255,255,255,0.2)`,
+                  borderRadius: 4,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'rgba(255,255,255,0.3)',
+                  fontSize: '0.7rem',
+                  fontStyle: 'italic',
+                }}
+              >
+                chart
+              </div>
+            )
+          }
+
           return (
             <div
               key={box.id}
