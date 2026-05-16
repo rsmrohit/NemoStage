@@ -1,11 +1,13 @@
 import asyncio
 import hashlib
 import io
+import itertools
 import json
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 import zipfile
@@ -36,6 +38,27 @@ MAX_AGENT_SLIDE_TEXT_CHARS = 1200
 CHROMA_ROOT = "/home/asus/nemostage-chroma"
 BREV_OLLAMA_URL = "http://127.0.0.1:11436"
 BREV_OLLAMA_MODEL = "gemma4:26b"
+
+# Port 11437 = SSH tunnel → Brev 2x L40S (204.52.26.237), brev-tunnel.service
+# OLLAMA_MAX_LOADED_MODELS=6, OLLAMA_NUM_PARALLEL=4 on Brev
+# Benchmark result: nemotron-3-nano:4b is the smallest model with 100% accuracy (2.0s avg)
+# gemma3:4b/12b both fail other_slide; gemma4:26b returns 500 on Brev
+_BREV = "http://127.0.0.1:11437"
+CLASSIFY_POOL = [
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+]
+GENERATE_POOL = [
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+]
+# Kept for any legacy callers
+CLASSIFY_OLLAMA_URL, CLASSIFY_OLLAMA_MODEL = CLASSIFY_POOL[0]
+GENERATE_OLLAMA_URL, GENERATE_OLLAMA_MODEL = GENERATE_POOL[-1]
 MAX_RECENT_QA = 20
 DECK_INDEX_PATH = os.path.join(CHROMA_ROOT, "decks.json")
 MATERIAL_MAX_FILE_BYTES = 25 * 1024 * 1024
@@ -54,7 +77,22 @@ _embedding_model = None
 _chroma_client = None
 
 generated_slides: dict[str, list[dict]] = {}
+pending_generation_topics: dict[str, set[str]] = {}
 recent_qa: list[dict] = []
+
+_pool_lock = threading.Lock()
+_classify_cycle = itertools.cycle(CLASSIFY_POOL)
+_generate_cycle = itertools.cycle(GENERATE_POOL)
+
+
+def next_classify() -> tuple[str, str]:
+    with _pool_lock:
+        return next(_classify_cycle)
+
+
+def next_generate() -> tuple[str, str]:
+    with _pool_lock:
+        return next(_generate_cycle)
 
 
 class PresentationSlide(BaseModel):
@@ -1087,14 +1125,14 @@ def ask_agent(prompt: str, agent: str = "main", timeout: int = 300, session_id: 
     raise HTTPException(status_code=502, detail=f"Agent {agent} returned no parseable response: {result.stdout[:300]}")
 
 
-def _sync_brev_call(prompt: str, timeout: int) -> str:
+def _sync_ollama_call(prompt: str, timeout: int, base_url: str, model: str) -> str:
     payload = json.dumps({
-        "model": BREV_OLLAMA_MODEL,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }).encode()
     req = urllib.request.Request(
-        f"{BREV_OLLAMA_URL}/v1/chat/completions",
+        f"{base_url}/v1/chat/completions",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -1104,14 +1142,24 @@ def _sync_brev_call(prompt: str, timeout: int) -> str:
     return result["choices"][0]["message"]["content"]
 
 
-async def ask_brev_ollama(prompt: str, timeout: int = 120) -> str:
+def _sync_brev_call(prompt: str, timeout: int) -> str:
+    return _sync_ollama_call(prompt, timeout, BREV_OLLAMA_URL, BREV_OLLAMA_MODEL)
+
+
+async def ask_ollama(prompt: str, base_url: str, model: str, timeout: int = 120) -> str:
     loop = asyncio.get_event_loop()
     try:
-        return await loop.run_in_executor(None, _sync_brev_call, prompt, timeout)
+        return await loop.run_in_executor(
+            None, _sync_ollama_call, prompt, timeout, base_url, model
+        )
     except urllib.error.URLError as exc:
-        raise HTTPException(status_code=502, detail=f"Brev Ollama unreachable: {exc}")
+        raise HTTPException(status_code=502, detail=f"Ollama unreachable ({base_url}): {exc}")
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail=f"Brev Ollama bad response: {exc}")
+        raise HTTPException(status_code=502, detail=f"Ollama bad response: {exc}")
+
+
+async def ask_brev_ollama(prompt: str, timeout: int = 120) -> str:
+    return await ask_ollama(prompt, BREV_OLLAMA_URL, BREV_OLLAMA_MODEL, timeout)
 
 
 async def ask_agent_async(
@@ -1127,6 +1175,8 @@ async def ask_agent_async(
 async def generate_slide_background(
     presentation_id: str, topic: str, after_slide: int, session: "PresentationSession"
 ) -> None:
+    topic_key = topic.lower().strip()[:80]
+    pending_generation_topics.setdefault(presentation_id, set()).add(topic_key)
     deck_info = find_deck_index(session.file_name)
     style_spec = (deck_info.style_spec or {}) if deck_info else {}
     templates = (style_spec.get("slide_templates") or [])[:SLIDE_TEMPLATE_LIMIT]
@@ -1192,7 +1242,8 @@ async def generate_slide_background(
     )
 
     try:
-        reply = await ask_brev_ollama(prompt, timeout=90)
+        generate_url, generate_model = next_generate()
+        reply = await ask_ollama(prompt, generate_url, generate_model, timeout=90)
         parsed = parse_json_reply(reply)
         if not isinstance(parsed, dict) or "title" not in parsed:
             return
@@ -1222,6 +1273,8 @@ async def generate_slide_background(
         generated_slides.setdefault(presentation_id, []).append(entry)
     except Exception:
         pass
+    finally:
+        pending_generation_topics.get(presentation_id, set()).discard(topic_key)
 
 
 @app.get("/agents")
@@ -1479,7 +1532,8 @@ async def analyze_transcript_with_brev(
         '"topic": "<str|null>", "reason": "<str>"}\n'
     )
 
-    reply = await ask_brev_ollama(prompt)
+    classify_url, classify_model = next_classify()
+    reply = await ask_ollama(prompt, classify_url, classify_model)
     parsed = parse_json_reply(reply)
     agent_result = parsed if isinstance(parsed, dict) else {"raw": reply}
 
@@ -1497,8 +1551,15 @@ async def analyze_transcript_with_brev(
     generation_queued = False
     if queue_generation and slide_generation_needed and session.deck_id:
         topic = (agent_result.get("topic") or "unknown topic") if isinstance(agent_result, dict) else "unknown topic"
-        asyncio.create_task(generate_slide_background(payload.presentation_id, topic, session.current_slide, session))
-        generation_queued = True
+        topic_key = topic.lower().strip()[:80]
+        already_done = any(
+            s.get("topic", "").lower().strip()[:80] == topic_key
+            for s in generated_slides.get(payload.presentation_id, [])
+        )
+        already_pending = topic_key in pending_generation_topics.get(payload.presentation_id, set())
+        if not already_done and not already_pending:
+            asyncio.create_task(generate_slide_background(payload.presentation_id, topic, session.current_slide, session))
+            generation_queued = True
         slide_generation_needed = False
 
     session.last_agent_result = agent_result
@@ -1818,6 +1879,24 @@ def delete_presentation(filename: str):
     deck_indexes_by_filename.pop(filename, None)
     persist_deck_index_manifest()
     return JSONResponse({"status": "ok", "deleted": filename, "sandbox_path": target})
+
+
+@app.on_event("startup")
+async def warm_brev_models() -> None:
+    async def _warm(url: str, model: str) -> None:
+        try:
+            await ask_ollama("hi", url, model, timeout=120)
+        except Exception:
+            pass
+
+    seen: set[tuple[str, str]] = set()
+    tasks = []
+    for entry in CLASSIFY_POOL + GENERATE_POOL:
+        if entry not in seen:
+            seen.add(entry)
+            tasks.append(asyncio.create_task(_warm(*entry)))
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @app.get("/status")
