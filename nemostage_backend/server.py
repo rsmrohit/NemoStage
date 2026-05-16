@@ -40,9 +40,7 @@ BREV_OLLAMA_URL = "http://127.0.0.1:11436"
 BREV_OLLAMA_MODEL = "gemma4:26b"
 
 # Port 11437 = SSH tunnel → Brev 2x L40S (204.52.26.237), brev-tunnel.service
-# OLLAMA_MAX_LOADED_MODELS=6, OLLAMA_NUM_PARALLEL=4 on Brev
-# Benchmark result: nemotron-3-nano:4b is the smallest model with 100% accuracy (2.0s avg)
-# gemma3:4b/12b both fail other_slide; gemma4:26b returns 500 on Brev
+# Benchmark: nemotron-3-nano:4b = 100% accuracy @ 2.0s avg; qwen3.6:35b for high-quality generation
 _BREV = "http://127.0.0.1:11437"
 CLASSIFY_POOL = [
     (_BREV, "nemotron-3-nano:4b"),
@@ -51,10 +49,10 @@ CLASSIFY_POOL = [
     (_BREV, "nemotron-3-nano:4b"),
 ]
 GENERATE_POOL = [
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "qwen3:8b"),
+    (_BREV, "qwen3:8b"),
+    (_BREV, "qwen3:8b"),
+    (_BREV, "qwen3:8b"),
 ]
 # Kept for any legacy callers
 CLASSIFY_OLLAMA_URL, CLASSIFY_OLLAMA_MODEL = CLASSIFY_POOL[0]
@@ -501,6 +499,35 @@ def clamp_ratio(value: float) -> float:
     return round(max(0.0, min(1.0, value)), 4)
 
 
+def deduplicate_overlapping_boxes(boxes: list[dict]) -> list[dict]:
+    """Remove boxes that overlap >50% of the smaller box's area, keeping the larger box."""
+    def box_area(b: dict) -> float:
+        return b["w"] * b["h"]
+
+    def intersection_ratio(b1: dict, b2: dict) -> float:
+        ix = max(0.0, min(b1["x"] + b1["w"], b2["x"] + b2["w"]) - max(b1["x"], b2["x"]))
+        iy = max(0.0, min(b1["y"] + b1["h"], b2["y"] + b2["h"]) - max(b1["y"], b2["y"]))
+        inter = ix * iy
+        smaller = min(box_area(b1), box_area(b2))
+        return inter / smaller if smaller > 0 else 0.0
+
+    keep = list(boxes)
+    changed = True
+    while changed:
+        changed = False
+        remove: set[int] = set()
+        for i in range(len(keep)):
+            for j in range(i + 1, len(keep)):
+                if i in remove or j in remove:
+                    continue
+                if intersection_ratio(keep[i], keep[j]) > 0.5:
+                    drop = i if box_area(keep[i]) <= box_area(keep[j]) else j
+                    remove.add(drop)
+                    changed = True
+        keep = [b for idx, b in enumerate(keep) if idx not in remove]
+    return keep
+
+
 def extract_slide_size(z: zipfile.ZipFile, names: set[str]) -> tuple[int, int]:
     if "ppt/presentation.xml" not in names:
         return DEFAULT_SLIDE_WIDTH_EMU, DEFAULT_SLIDE_HEIGHT_EMU
@@ -725,6 +752,9 @@ def extract_slide_templates(content: bytes, style_spec: dict, max_templates: int
                 if not text_boxes:
                     continue
                 text_boxes = sorted(text_boxes, key=lambda item: (item["y"], item["x"]))[:SLIDE_TEMPLATE_MAX_TEXT_BOXES]
+                text_boxes = deduplicate_overlapping_boxes(text_boxes)
+                if not text_boxes:
+                    continue
                 primary = max(
                     text_boxes,
                     key=lambda item: (
@@ -1173,13 +1203,20 @@ async def ask_agent_async(
 
 
 async def generate_slide_background(
-    presentation_id: str, topic: str, after_slide: int, session: "PresentationSession"
+    presentation_id: str, topic: str, after_slide: int, session: "PresentationSession",
+    transcript: str = "",
 ) -> None:
     topic_key = topic.lower().strip()[:80]
     pending_generation_topics.setdefault(presentation_id, set()).add(topic_key)
     deck_info = find_deck_index(session.file_name)
     style_spec = (deck_info.style_spec or {}) if deck_info else {}
-    templates = (style_spec.get("slide_templates") or [])[:SLIDE_TEMPLATE_LIMIT]
+    raw_templates = (style_spec.get("slide_templates") or [])[:SLIDE_TEMPLATE_LIMIT]
+    # Apply overlap deduplication at runtime so stored indexes benefit from the fix too
+    templates = []
+    for t in raw_templates:
+        clean_boxes = deduplicate_overlapping_boxes(list(t.get("text_boxes") or []))
+        if clean_boxes:
+            templates.append({**t, "text_boxes": clean_boxes})
     template_choices = [
         {
             "id": template.get("id"),
@@ -1218,32 +1255,34 @@ async def generate_slide_background(
         for m in top_matches
     ) if top_matches else "[no slide context available]"
 
+    transcript_line = f"Speaker's actual words:\n{transcript}\n\n" if transcript.strip() else ""
     prompt = (
-        "You are generating a supplemental slide for a live presentation. "
-        "The speaker just covered a topic not in their deck. "
-        "Create a slide that matches the deck's style and depth.\n\n"
-        f"Topic not covered: {topic}\n\n"
-        f"Relevant slide context from the deck:\n{context_block}\n\n"
-        f"Deck style spec: bg_color={style_spec.get('bg_color', '#1a1a2e')}, "
+        "You are creating an educational supplemental slide for a live presentation. "
+        "The speaker said something not covered in their deck. "
+        "Generate a slide that fully explains the topic using the deck's visual style.\n\n"
+        f"{transcript_line}"
+        f"Topic to cover: {topic}\n\n"
+        f"Relevant context from the deck:\n{context_block}\n\n"
+        f"Deck style: bg_color={style_spec.get('bg_color', '#1a1a2e')}, "
         f"accent_color={style_spec.get('accent_color', '#4f8ef7')}, "
         f"font_family={style_spec.get('font_family', 'Calibri')}\n\n"
-        "Clean slide templates extracted from the user's deck. These are original slide text boxes "
-        "with their text wiped; choose the template whose box count and layout best fit the topic:\n"
+        "Templates extracted from the user's deck — choose the layout that best fits the content:\n"
         f"{json.dumps(template_choices, ensure_ascii=True)}\n\n"
-        "Return EXACTLY one JSON object:\n"
-        '{"template_id": "<one template id or null>", "title": "<5-8 word title>", '
-        '"text_boxes": [{"id": "<box id>", "text": "<text for that box>"}], '
-        '"bullets": ["<fallback point 1>", "<fallback point 2>", "<fallback point 3>"], '
-        '"notes": "<1-2 sentence speaker notes>", '
-        '"style_hint": {"bg": "<hex>", "accent": "<hex>", "font": "<family>"}}\n'
-        "Use concise slide text. Put the title in the title box when one exists. "
-        "Fill every useful content box; leave no box id out unless it is decorative or too small. "
-        "Return only the JSON. No markdown, no explanation."
+        "Return EXACTLY one JSON object — no markdown, no explanation:\n"
+        '{"template_id": "<id from templates above>", "title": "<6-10 word descriptive title>", '
+        '"text_boxes": [{"id": "<box id>", "text": "<3-5 bullet points as newline-separated lines using • as bullet char, each a complete informative sentence>"}], '
+        '"bullets": ["<point 1, full sentence>", "<point 2, full sentence>", "<point 3, full sentence>", "<point 4, full sentence>"], '
+        '"notes": "<2-3 sentence speaker notes covering key talking points>", '
+        '"style_hint": {"bg": "<exact bg_color from chosen template>", "accent": "<accent_color>", "font": "<font_family>"}}\n'
+        "Rules: title box gets only the slide title. "
+        "Body boxes get 3-5 bullet points each as complete, informative sentences — do not write fragments. "
+        "Fill every body box; do not leave any box empty. "
+        "Match bg_color exactly from the chosen template — do not invent colors."
     )
 
     try:
         generate_url, generate_model = next_generate()
-        reply = await ask_ollama(prompt, generate_url, generate_model, timeout=90)
+        reply = await ask_ollama(prompt, generate_url, generate_model, timeout=180)
         parsed = parse_json_reply(reply)
         if not isinstance(parsed, dict) or "title" not in parsed:
             return
@@ -1257,6 +1296,12 @@ async def generate_slide_background(
             text_boxes = []
         latest_session = presentation_sessions.get(presentation_id)
         insertion_slide = latest_session.current_slide if latest_session else after_slide
+        # Use ground-truth colors from the actual template, not the LLM's guess
+        style_hint = {
+            "bg": (selected_template.get("bg_color") if selected_template else None) or style_spec.get("bg_color", "#1a1a2e"),
+            "accent": style_spec.get("accent_color", "#4f8ef7"),
+            "font": style_spec.get("font_family", "Calibri"),
+        }
         entry = {
             "index": len(generated_slides.get(presentation_id, [])),
             "title": parsed.get("title", topic),
@@ -1265,7 +1310,7 @@ async def generate_slide_background(
             "template": selected_template,
             "text_boxes": text_boxes,
             "notes": parsed.get("notes", ""),
-            "style_hint": parsed.get("style_hint", style_spec),
+            "style_hint": style_hint,
             "after_slide": insertion_slide,
             "topic": topic,
             "created_at": time.time(),
@@ -1558,7 +1603,7 @@ async def analyze_transcript_with_brev(
         )
         already_pending = topic_key in pending_generation_topics.get(payload.presentation_id, set())
         if not already_done and not already_pending:
-            asyncio.create_task(generate_slide_background(payload.presentation_id, topic, session.current_slide, session))
+            asyncio.create_task(generate_slide_background(payload.presentation_id, topic, session.current_slide, session, transcript=transcript))
             generation_queued = True
         slide_generation_needed = False
 
@@ -1673,9 +1718,19 @@ async def brev_transcript(payload: PresentationTranscriptRequest):
 
 @app.get("/presentation/{presentation_id}/generated-slides")
 async def get_generated_slides(presentation_id: str):
+    slides = generated_slides.get(presentation_id, [])
+    # Ensure template text_boxes are deduplication-clean even for slides stored before the fix
+    clean_slides = []
+    for slide in slides:
+        template = slide.get("template")
+        if template and template.get("text_boxes"):
+            clean_boxes = deduplicate_overlapping_boxes(list(template["text_boxes"]))
+            clean_slides.append({**slide, "template": {**template, "text_boxes": clean_boxes}})
+        else:
+            clean_slides.append(slide)
     return JSONResponse({
         "presentation_id": presentation_id,
-        "slides": generated_slides.get(presentation_id, []),
+        "slides": clean_slides,
     })
 
 
