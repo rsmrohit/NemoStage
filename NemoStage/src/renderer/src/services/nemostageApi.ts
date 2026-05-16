@@ -132,6 +132,7 @@ export function sendPresentationTranscript(
   presentationId: string,
   transcript: string
 ): Promise<TranscriptAnalysisResponse> {
+  console.log(`[api] POST /presentation/transcript — presentationId: ${presentationId} | ${transcript.length} chars`)
   return postJson('/presentation/transcript', {
     presentation_id: presentationId,
     transcript
