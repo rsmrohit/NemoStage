@@ -13,7 +13,7 @@ import websockets
 logging.basicConfig(level=logging.INFO)
 
 
-async def handler(websocket, path):
+async def handler(websocket):
     logging.info("DGX client connected")
     try:
         async for message in websocket:

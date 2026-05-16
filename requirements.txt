@@ -6,3 +6,4 @@ sounddevice
 noisereduce
 sentence-transformers
 chromadb
+pyannote.audio
