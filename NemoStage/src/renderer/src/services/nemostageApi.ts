@@ -35,7 +35,7 @@ export interface TranscriptAnalysisResponse {
   presentation_id: string
   current_slide: number
   agent_result: TranscriptAgentResult
-  coverage_status: 'current_slide' | 'other_slide' | 'not_covered' | 'unknown'
+  coverage_status: 'current_slide' | 'other_slide' | 'not_covered' | 'not_relevant' | 'unknown'
   slide_generation_needed: boolean
   vector_search?: {
     status: string
