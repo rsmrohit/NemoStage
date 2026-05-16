@@ -58,9 +58,18 @@ export interface ExtractionProgressEvent {
   message: string
 }
 
+export interface SandboxUploadResult {
+  status: string
+  filename: string
+  sandbox_path: string
+  container: string
+  size_bytes: number
+}
+
 export interface ElectronAPI {
   selectPPTX: () => Promise<string | null>
   getFileStats: (filePath: string) => Promise<{ size: number; mtimeMs: number } | null>
+  uploadPPTXToSandbox: (filePath: string) => Promise<SandboxUploadResult>
   extractPPTX: (filePath: string) => Promise<ExtractionResult>
   getSlideImage: (sessionId: string, slideIndex: number) => Promise<string | null>
   getSlideData: (sessionId: string, slideIndex: number) => Promise<SlideData>

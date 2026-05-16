@@ -1,13 +1,36 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { FileSelector } from './components/FileSelector'
 import { NavigationControls } from './components/NavigationControls'
 import { SlideCanvas } from './components/SlideCanvas'
 import { SlideGallery } from './components/SlideGallery'
+import {
+  listSandboxPresentations,
+  sendPresentationTranscript,
+  startPresentation,
+  summarizeSlideData,
+  updatePresentationSlide
+} from './services/nemostageApi'
 import { usePresentationStore } from './store/presentationStore'
-import type { ExtractionPhase, SessionMetadata } from './types/presentation'
+import type { ExtractionPhase, SessionMetadata, SlideData } from './types/presentation'
 
 type AppMode = 'select' | 'gallery' | 'live'
+type LiveAgentStatus =
+  | 'idle'
+  | 'starting'
+  | 'ready'
+  | 'analyzing'
+  | 'on-slide'
+  | 'covered-elsewhere'
+  | 'slide-generation-needed'
+  | 'error'
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
+  }
+  return 'Unexpected error'
+}
 
 function AppContent(): React.JSX.Element {
   const {
@@ -34,13 +57,27 @@ function AppContent(): React.JSX.Element {
   const [progress, setProgress] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([])
+  const [presentationId, setPresentationId] = useState<string | null>(null)
+  const [transcriptText, setTranscriptText] = useState('')
+  const [liveAgentStatus, setLiveAgentStatus] = useState<LiveAgentStatus>('idle')
+  const [liveAgentMessage, setLiveAgentMessage] = useState('No transcript analyzed yet.')
+  const [slideGenerationNeeded, setSlideGenerationNeeded] = useState(false)
 
   const currentSlideImage = slides[currentSlide]?.imagePaths[0] ?? null
   const currentSlideData = slideData[currentSlide] ?? null
 
   const loadRecentSessions = async (): Promise<void> => {
-    const sessions = await window.electronAPI.getRecentSessions()
-    setRecentSessions(sessions)
+    try {
+      const [sessions, sandbox] = await Promise.all([
+        window.electronAPI.getRecentSessions(),
+        listSandboxPresentations()
+      ])
+      const sandboxFilenames = new Set(sandbox.presentations.map((presentation) => presentation.filename))
+      setRecentSessions(sessions.filter((session) => sandboxFilenames.has(session.fileName)))
+    } catch (error) {
+      setRecentSessions([])
+      setStatusMessage(`Sandbox presentations unavailable: ${getErrorMessage(error)}`)
+    }
   }
 
   useEffect(() => {
@@ -152,6 +189,25 @@ function AppContent(): React.JSX.Element {
     }
   }, [currentSlide, sessionId, doclingStatus, setSlideData])
 
+  useEffect(() => {
+    if (mode !== 'live' || !presentationId) {
+      return
+    }
+
+    let cancelled = false
+    void updatePresentationSlide(presentationId, currentSlide).catch((error) => {
+      if (cancelled) {
+        return
+      }
+      setLiveAgentStatus('error')
+      setLiveAgentMessage(`Slide sync failed: ${getErrorMessage(error)}`)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [currentSlide, mode, presentationId])
+
   const startExtraction = async (filePath: string): Promise<void> => {
     setErrorMessage(null)
     setStatusMessage('Starting extraction...')
@@ -160,6 +216,8 @@ function AppContent(): React.JSX.Element {
 
     try {
       const result = await window.electronAPI.extractPPTX(filePath)
+      setStatusMessage('Uploading presentation to sandbox...')
+      await window.electronAPI.uploadPPTXToSandbox(filePath)
       setExtraction(result)
       setMode('gallery')
       setStatusMessage(
@@ -198,7 +256,109 @@ function AppContent(): React.JSX.Element {
     if (selectedSessionId === sessionId) {
       reset()
       setMode('select')
+      setPresentationId(null)
+      setLiveAgentStatus('idle')
+      setLiveAgentMessage('No transcript analyzed yet.')
+      setSlideGenerationNeeded(false)
       setStatusMessage('Session cleared')
+    }
+  }
+
+  const buildPresentationSlides = async (): Promise<ReturnType<typeof summarizeSlideData>[]> => {
+    if (!sessionId) {
+      return []
+    }
+
+    return Promise.all(
+      slides.map(async (_slide, index) => {
+        let data: SlideData | null = slideData[index] ?? null
+
+        if (!data && doclingStatus === 'ready') {
+          try {
+            data = await window.electronAPI.getSlideData(sessionId, index)
+            setSlideData(index, data)
+          } catch {
+            data = null
+          }
+        }
+
+        return summarizeSlideData(index, data)
+      })
+    )
+  }
+
+  const handleLaunchPresentation = async (): Promise<void> => {
+    if (!sessionId) {
+      return
+    }
+
+    setErrorMessage(null)
+    setLiveAgentStatus('starting')
+    setLiveAgentMessage('Starting live presentation session...')
+    setSlideGenerationNeeded(false)
+
+    try {
+      const presentationSlides = await buildPresentationSlides()
+      const result = await startPresentation({
+        session_id: sessionId,
+        file_name: usePresentationStore.getState().fileName ?? '',
+        slide_count: totalSlides,
+        current_slide: currentSlide,
+        slides: presentationSlides
+      })
+
+      setPresentationId(result.presentation_id)
+      setLiveAgentStatus('ready')
+      setLiveAgentMessage('Live transcript agent ready.')
+      setMode('live')
+    } catch (error) {
+      setLiveAgentStatus('error')
+      setLiveAgentMessage(`Could not start live session: ${getErrorMessage(error)}`)
+    }
+  }
+
+  const handleTranscriptSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault()
+
+    if (!presentationId) {
+      setLiveAgentStatus('error')
+      setLiveAgentMessage('Start the live presentation before sending transcript.')
+      return
+    }
+
+    const transcript = transcriptText.trim()
+    if (!transcript) {
+      return
+    }
+
+    setLiveAgentStatus('analyzing')
+    setLiveAgentMessage('Analyzing transcript against current slide...')
+
+    try {
+      const result = await sendPresentationTranscript(presentationId, transcript)
+      const agentSummary = result.agent_result.summary_so_far ?? ''
+      const missingTopic = result.agent_result.topic ?? result.agent_result.off_slide_topic
+      const matchedSlide = result.agent_result.matched_slide
+
+      setSlideGenerationNeeded(result.slide_generation_needed)
+      if (result.coverage_status === 'not_covered') {
+        setLiveAgentStatus('slide-generation-needed')
+        setLiveAgentMessage(`Slide generation needed${missingTopic ? `: ${missingTopic}` : ''}`)
+      } else if (result.coverage_status === 'other_slide') {
+        setLiveAgentStatus('covered-elsewhere')
+        setLiveAgentMessage(
+          `Covered on another slide${typeof matchedSlide === 'number' ? ` (${matchedSlide + 1})` : ''}. ${
+            agentSummary || result.agent_result.reason || ''
+          }`.trim()
+        )
+      } else {
+        setLiveAgentStatus('on-slide')
+        setLiveAgentMessage(agentSummary || 'Speaker appears to be on the current slide.')
+      }
+      setTranscriptText('')
+    } catch (error) {
+      setLiveAgentStatus('error')
+      setLiveAgentMessage(`Transcript analysis failed: ${getErrorMessage(error)}`)
     }
   }
 
@@ -254,7 +414,7 @@ function AppContent(): React.JSX.Element {
               slides={slides}
               currentSlide={currentSlide}
               onSlideSelect={goToSlide}
-              onLaunch={() => setMode('live')}
+              onLaunch={() => void handleLaunchPresentation()}
             />
             {currentSlideImage && (
               <div className="selected-preview">
@@ -279,7 +439,7 @@ function AppContent(): React.JSX.Element {
               onToggleSidebar={() => setSidebarOpen((state) => !state)}
             />
 
-            <div className="live-layout">
+            <div className={`live-layout ${sidebarOpen ? '' : 'no-sidebar'}`}>
               {sidebarOpen && (
                 <aside className="thumbnail-sidebar">
                   {slides.map((slide, index) => (
@@ -300,11 +460,49 @@ function AppContent(): React.JSX.Element {
                 </aside>
               )}
 
-              <SlideCanvas
-                currentSlide={currentSlide}
-                slideData={currentSlideData}
-                slideImage={currentSlideImage}
-              />
+              <div className="live-stage">
+                <SlideCanvas
+                  currentSlide={currentSlide}
+                  slideData={currentSlideData}
+                  slideImage={currentSlideImage}
+                />
+
+                <aside className="live-agent-panel" aria-label="Live transcript agent">
+                  <div className="live-agent-header">
+                    <h3>Transcript Agent</h3>
+                    <span className={`live-agent-status ${liveAgentStatus}`}>
+                      {liveAgentStatus === 'slide-generation-needed'
+                        ? 'generation needed'
+                        : liveAgentStatus === 'covered-elsewhere'
+                          ? 'covered elsewhere'
+                        : liveAgentStatus}
+                    </span>
+                  </div>
+
+                  {slideGenerationNeeded && (
+                    <div className="generation-alert">Slide generation needed</div>
+                  )}
+
+                  <p className="live-agent-message">{liveAgentMessage}</p>
+
+                  <form className="transcript-form" onSubmit={(event) => void handleTranscriptSubmit(event)}>
+                    <label htmlFor="live-transcript">Live transcript chunk</label>
+                    <textarea
+                      id="live-transcript"
+                      value={transcriptText}
+                      onChange={(event) => setTranscriptText(event.target.value)}
+                      placeholder="Paste or type what the speaker just said..."
+                    />
+                    <button
+                      className="primary"
+                      type="submit"
+                      disabled={!presentationId || liveAgentStatus === 'analyzing' || !transcriptText.trim()}
+                    >
+                      {liveAgentStatus === 'analyzing' ? 'Analyzing...' : 'Send transcript'}
+                    </button>
+                  </form>
+                </aside>
+              </div>
             </div>
           </div>
         )}

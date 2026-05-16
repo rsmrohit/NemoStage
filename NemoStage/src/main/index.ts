@@ -6,19 +6,6 @@ import { registerIpcHandlers } from './ipcHandlers'
 import { cleanupOldSessions } from './services/workspaceManager'
 
 function createWindow(): BrowserWindow {
-
-  protocol.registerFileProtocol('nemostage-media', (request, callback) => {
-    const url = request.url.replace('nemostage-media://', '')
-    const decodedPath = decodeURIComponent(url)
-    
-    try {
-      return callback({ path: decodedPath })
-    } catch (error) {
-      console.error('Failed to load media:', error)
-      return callback({ error: -2 }) // FILE_NOT_FOUND
-    }
-  })
-
   const mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -56,11 +43,12 @@ app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.electron')
 
   protocol.handle('nemostage-media', (request) => {
-    const url = request.url.replace('nemostage-media://', '')
-    const filePath = decodeURIComponent(url)
-    
-    // Use net.fetch to load the file
-    return net.fetch(`file://${filePath}`)
+    const raw = request.url.replace('nemostage-media://', '')
+    const filePath = decodeURIComponent(raw)
+    // Windows paths need file:///C:/... (forward slashes, extra leading slash)
+    const normalized = filePath.replace(/\\/g, '/')
+    const fileUrl = normalized.startsWith('/') ? `file://${normalized}` : `file:///${normalized}`
+    return net.fetch(fileUrl)
   })
 
   app.on('browser-window-created', (_, window) => {

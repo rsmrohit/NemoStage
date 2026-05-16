@@ -27,8 +27,22 @@ export interface PptxSlide {
   speakerNotes?: string
 }
 
+export interface PptxTableCell {
+  textRuns: TextRun[]
+  content: string
+  fillColor?: string
+  colSpan?: number
+  rowSpan?: number
+  isContinuation?: boolean  // hMerge or vMerge — skip in rendering
+}
+
+export interface PptxTableRow {
+  cells: PptxTableCell[]
+  height: number  // EMUs
+}
+
 export interface PptxElement {
-  type: 'text' | 'image' | 'shape'
+  type: 'text' | 'image' | 'shape' | 'table'
   bbox: {
     x: number
     y: number
@@ -38,6 +52,8 @@ export interface PptxElement {
   content?: string
   textRuns?: TextRun[]
   embedId?: string
+  tableRows?: PptxTableRow[]
+  colWidths?: number[]
 }
 
 export interface TextRun {
@@ -46,12 +62,17 @@ export interface TextRun {
   size: number
   bold?: boolean
   italic?: boolean
+  underline?: boolean
+  strikethrough?: boolean
+  baseline?: number  // percent; positive = superscript, negative = subscript
   color: string
+  paragraphAlign?: 'l' | 'ctr' | 'r' | 'just'
+  lineHeight?: number   // CSS line-height multiplier for this paragraph
 }
 
 // Keep DoclingElement for renderer compatibility
 export interface DoclingElement {
-  type: 'text' | 'image' | 'shape'
+  type: 'text' | 'image' | 'shape' | 'table'
   bbox: {
     x: number
     y: number
@@ -64,8 +85,18 @@ export interface DoclingElement {
     fontSize?: number
     color?: string
   }
-  textRuns?: TextRun[]  
-  crop?: ImageCrop  
+  textRuns?: TextRun[]
+  crop?: ImageCrop
+  fillColor?: string
+  rotation?: number
+  verticalAnchor?: 't' | 'ctr' | 'b'
+  shapeGeom?: string
+  textBoxStyle?: {
+    insL?: number; insR?: number; insT?: number; insB?: number
+    wrapNone?: boolean
+  }
+  tableRows?: PptxTableRow[]
+  colWidths?: number[]
 }
 
 export interface SlideData {
@@ -210,6 +241,7 @@ export interface PptxSlide {
   slideIndex: number
   elements: PptxElement[]
   speakerNotes?: string
+  background?: string  // CSS color string, e.g. '#FF0000' or 'transparent'
 }
 
 export interface ImageCrop {
@@ -220,7 +252,7 @@ export interface ImageCrop {
 }
 
 export interface PptxElement {
-  type: 'text' | 'image' | 'shape'
+  type: 'text' | 'image' | 'shape' | 'table'
   bbox: {
     x: number
     y: number
@@ -231,6 +263,16 @@ export interface PptxElement {
   textRuns?: TextRun[]
   imagePath?: string
   crop?: ImageCrop
+  fillColor?: string
+  rotation?: number
+  verticalAnchor?: 't' | 'ctr' | 'b'
+  shapeGeom?: string
+  textBoxStyle?: {
+    insL?: number; insR?: number; insT?: number; insB?: number
+    wrapNone?: boolean
+  }
+  tableRows?: PptxTableRow[]
+  colWidths?: number[]
 }
 
 export interface TextRun {
@@ -239,5 +281,9 @@ export interface TextRun {
   size: number
   bold?: boolean
   italic?: boolean
+  underline?: boolean
+  strikethrough?: boolean
+  baseline?: number
   color: string
+  paragraphAlign?: 'l' | 'ctr' | 'r' | 'just'
 }

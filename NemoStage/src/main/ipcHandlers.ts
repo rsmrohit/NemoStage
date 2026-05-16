@@ -2,7 +2,6 @@ import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron
 import fs from 'fs-extra'
 import path from 'path'
 import type {
-  DoclingManifest,
   ExtractionProgressEvent,
   ExtractionResult,
   SessionMetadata,
@@ -10,7 +9,6 @@ import type {
   DoclingElement,
   PptxManifest
 } from './types'
-import { runDoclingParser } from './services/doclingParser'
 import { extractPPTX, extractThemeFonts, parseSlideRelationships } from './services/pptxExtractor'
 import {
   clearSession,
@@ -26,9 +24,9 @@ import {
 import { parsePPTXStructure } from './services/pptxXmlParser'
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
-const PPTX_HEIGHT_EMU = 6858000
+const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
 const sessions = new Map<string, SessionRuntime>()
-const doclingManifests = new Map<string, PptxManifest>() 
+const doclingManifests = new Map<string, PptxManifest>()
 
 function emitToRenderer(window: BrowserWindow | null, channel: string, payload: unknown): void {
   if (window && !window.isDestroyed()) {
@@ -38,36 +36,6 @@ function emitToRenderer(window: BrowserWindow | null, channel: string, payload: 
 
 function toFileUrl(absolutePath: string): string {
   return `nemostage-media://${absolutePath}`
-}
-
-function normalizeDoclingBox(bbox: {
-  l: number
-  t: number
-  r: number
-  b: number
-  coord_origin: 'TOPLEFT' | 'BOTTOMLEFT'
-}): { x: number; y: number; width: number; height: number } {
-  const left = Math.min(bbox.l, bbox.r)
-  const width = Math.abs(bbox.r - bbox.l)
-  const rawTop = Math.min(bbox.t, bbox.b)
-  const rawBottom = Math.max(bbox.t, bbox.b)
-  const height = Math.abs(rawBottom - rawTop)
-
-  if (bbox.coord_origin === 'BOTTOMLEFT') {
-    return {
-      x: left,
-      y: PPTX_HEIGHT_EMU - rawBottom,
-      width,
-      height
-    }
-  }
-
-  return {
-    x: left,
-    y: rawTop,
-    width,
-    height
-  }
 }
 
 async function validatePptxFile(filePath: string): Promise<string[]> {
@@ -175,6 +143,32 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     }
   })
 
+  ipcMain.handle('pptx:uploadToSandbox', async (_event, filePath: string) => {
+    await validatePptxFile(filePath)
+
+    const bytes = await fs.readFile(filePath)
+    const formData = new FormData()
+    formData.append(
+      'file',
+      new Blob([new Uint8Array(bytes)], {
+        type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+      }),
+      path.basename(filePath)
+    )
+
+    const response = await fetch(`${NEMOSTAGE_BACKEND_URL}/sandbox/uploadpptx`, {
+      method: 'POST',
+      body: formData
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(text || `Sandbox upload failed: ${response.status}`)
+    }
+
+    return response.json()
+  })
+
   ipcMain.handle('pptx:extract', async (_event, filePath: string) => {
     const warnings = await validatePptxFile(filePath)
     const sessionId = generateSessionId()
@@ -223,10 +217,6 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     }
 
     sessions.set(sessionId, runtime)
-
-    const emitLog = (message: string): void => {
-      emitToRenderer(getMainWindow(), 'pptx:log', { sessionId, message })
-    }
 
     void parsePPTXStructure(filePath, sessionDir)
       .then(async (manifest) => {
@@ -293,45 +283,65 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     console.log(`[pptx:getData] ✅ Found slide with ${slide.elements.length} elements`)
     
     // Convert PptxElement to DoclingElement format (for renderer compatibility)
-      const elements: DoclingElement[] = slide.elements.map(element => {
-        if (element.type === 'text') {
-          const firstRun = element.textRuns?.[0]
-          
-          return {
-            type: 'text',
-            bbox: element.bbox,
-            content: element.content || '',
-            style: {
-              font: firstRun?.font || 'Calibri',
-              fontSize: firstRun?.size || 18,
-              color: firstRun?.color || '#000000'
-            },
-            textRuns: element.textRuns
-          }
-        } else if (element.type === 'image') {
-          return {
-            type: 'image',
-            bbox: element.bbox,
-            content: element.imagePath ? toFileUrl(element.imagePath) : '',  // Convert to nemostage-media:// URL
-            style: {},
-            crop: element.crop
-          }
-        } else {
-          return {
-            type: element.type,
-            bbox: element.bbox,
-            content: '',
-            style: {}
-          }
+    const elements: DoclingElement[] = slide.elements.map(element => {
+      if (element.type === 'text') {
+        const firstRun = element.textRuns?.[0]
+        return {
+          type: 'text',
+          bbox: element.bbox,
+          content: element.content || '',
+          style: {
+            font: firstRun?.font || 'Calibri',
+            fontSize: firstRun?.size || 18,
+            color: firstRun?.color || '#000000'
+          },
+          textRuns: element.textRuns,
+          fillColor: element.fillColor,
+          rotation: element.rotation,
+          verticalAnchor: element.verticalAnchor,
+          shapeGeom: element.shapeGeom,
+          textBoxStyle: element.textBoxStyle
         }
-      })
+      } else if (element.type === 'image') {
+        return {
+          type: 'image',
+          bbox: element.bbox,
+          content: element.imagePath ? toFileUrl(element.imagePath) : '',
+          style: {},
+          crop: element.crop,
+          rotation: element.rotation
+        }
+      } else if (element.type === 'table') {
+        return {
+          type: 'table',
+          bbox: element.bbox,
+          content: '',
+          style: {},
+          tableRows: element.tableRows,
+          colWidths: element.colWidths
+        }
+      } else {
+        return {
+          type: element.type,
+          bbox: element.bbox,
+          content: '',
+          style: {},
+          fillColor: element.fillColor,
+          rotation: element.rotation,
+          shapeGeom: element.shapeGeom
+        }
+      }
+    })
 
     console.log(`[pptx:getData] 📊 Returning ${elements.length} elements`)
-    
+
     return {
       slideIndex,
       elements,
-      speakerNotes: slide.speakerNotes  // Include speaker notes
+      speakerNotes: slide.speakerNotes,
+      background: slide.background,
+      slideWidth: manifest.slideWidth,
+      slideHeight: manifest.slideHeight
     }
   })
 

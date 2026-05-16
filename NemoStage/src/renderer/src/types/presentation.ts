@@ -20,8 +20,22 @@ export interface ImageCrop {
   bottom: number
 }
 
+export interface TableCell {
+  textRuns: TextRun[]
+  content: string
+  fillColor?: string
+  colSpan?: number
+  rowSpan?: number
+  isContinuation?: boolean
+}
+
+export interface TableRow {
+  cells: TableCell[]
+  height: number
+}
+
 export interface DoclingElement {
-  type: 'text' | 'image' | 'shape'
+  type: 'text' | 'image' | 'shape' | 'table'
   bbox: {
     x: number
     y: number
@@ -35,7 +49,17 @@ export interface DoclingElement {
     color?: string
   }
   textRuns?: TextRun[]
-  crop?: ImageCrop  // ← Add this
+  crop?: ImageCrop
+  fillColor?: string
+  rotation?: number
+  verticalAnchor?: 't' | 'ctr' | 'b'
+  shapeGeom?: string
+  textBoxStyle?: {
+    insL?: number; insR?: number; insT?: number; insB?: number
+    wrapNone?: boolean
+  }
+  tableRows?: TableRow[]
+  colWidths?: number[]
 }
 
 export interface TextRun {
@@ -44,20 +68,21 @@ export interface TextRun {
   size: number
   bold?: boolean
   italic?: boolean
+  underline?: boolean
+  strikethrough?: boolean
+  baseline?: number
   color: string
+  paragraphAlign?: 'l' | 'ctr' | 'r' | 'just'
+  lineHeight?: number
 }
 
 export interface SlideData {
   slideIndex: number
   elements: DoclingElement[]
   speakerNotes?: string
-  unmappedText?: string
-}
-
-export interface SlideData {
-  slideIndex: number
-  elements: DoclingElement[]
-  speakerNotes?: string
+  background?: string
+  slideWidth?: number
+  slideHeight?: number
 }
 
 export interface ExtractionResult {

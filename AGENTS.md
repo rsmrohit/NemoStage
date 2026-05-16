@@ -19,7 +19,7 @@ nemostage_backend/     # FastAPI backend — edit locally, deploy to DGX via SFT
 | Tailscale IP | `100.127.111.122` |
 | User / sudo pw | `asus` / `password` |
 
-## SSH from Claude Code (paramiko)
+## SSH from Codex (paramiko)
 
 No interactive TTY — use paramiko. Always decode as ASCII to avoid cp1252 errors on Windows:
 

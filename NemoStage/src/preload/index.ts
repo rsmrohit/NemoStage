@@ -4,6 +4,7 @@ import type { ElectronAPI } from './index.d'
 const electronAPI: ElectronAPI = {
   selectPPTX: () => ipcRenderer.invoke('dialog:openFile'),
   getFileStats: (filePath) => ipcRenderer.invoke('file:getStats', filePath),
+  uploadPPTXToSandbox: (filePath) => ipcRenderer.invoke('pptx:uploadToSandbox', filePath),
   extractPPTX: (filePath) => ipcRenderer.invoke('pptx:extract', filePath),
   getSlideImage: (sessionId, index) => ipcRenderer.invoke('pptx:getImage', sessionId, index),
   getSlideData: (sessionId, index) => ipcRenderer.invoke('pptx:getData', sessionId, index),

@@ -309,6 +309,18 @@ body {
   min-height: 0;
 }
 
+.live-layout.no-sidebar {
+  grid-template-columns: 1fr;
+}
+
+.live-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
 .thumbnail-sidebar {
   overflow-y: auto;
   display: grid;
@@ -380,6 +392,114 @@ body {
   user-select: none;
 }
 
+.live-agent-panel {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  align-self: start;
+  gap: 10px;
+  min-width: 0;
+  max-height: 100%;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+}
+
+.live-agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.live-agent-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.live-agent-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #edf2fb;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.live-agent-status.analyzing,
+.live-agent-status.starting {
+  background: #fff6df;
+  color: #775400;
+}
+
+.live-agent-status.on-slide,
+.live-agent-status.ready {
+  background: #e2f7ea;
+  color: #176339;
+}
+
+.live-agent-status.covered-elsewhere {
+  background: #e7f4ff;
+  color: #005f95;
+}
+
+.live-agent-status.slide-generation-needed,
+.generation-alert {
+  background: #ffe5e5;
+  color: #7a1919;
+}
+
+.live-agent-status.error {
+  background: #f7d7d7;
+  color: #7a1919;
+}
+
+.generation-alert {
+  padding: 10px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.live-agent-message {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.transcript-form {
+  display: grid;
+  gap: 8px;
+}
+
+.transcript-form label {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.transcript-form textarea {
+  width: 100%;
+  min-height: 130px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--text);
+  background: #ffffff;
+  font: inherit;
+  line-height: 1.4;
+}
+
+.transcript-form textarea:focus {
+  outline: 2px solid #b6daf1;
+  outline-offset: 1px;
+}
+
 .recent-sessions {
   margin-top: 20px;
   border-top: 1px solid var(--border);
@@ -429,6 +549,10 @@ body {
   }
 
   .live-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .live-stage {
     grid-template-columns: 1fr;
   }
 

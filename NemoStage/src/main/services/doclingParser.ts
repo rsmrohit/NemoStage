@@ -5,7 +5,7 @@ import { app } from 'electron'
 import type { DoclingManifest, ExtractionProgressEvent } from '../types'
 
 export function runDoclingParser(
-pptxPath: string, outputPath: string, onProgress?: (event: ExtractionProgressEvent) => void, emitLog?: (message: string) => void): Promise<DoclingManifest> {
+pptxPath: string, outputPath: string, onProgress?: (event: ExtractionProgressEvent) => void, _emitLog?: (message: string) => void): Promise<DoclingManifest> {
   return new Promise((resolve, reject) => {
     onProgress?.({ phase: 'parsing_structure', progress: 0.05, message: 'Starting Docling parser' })
 
