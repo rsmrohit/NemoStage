@@ -13,15 +13,45 @@ export interface BoundingBox {
   height: number
 }
 
+export interface ImageCrop {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
 export interface DoclingElement {
   type: 'text' | 'image' | 'shape'
-  bbox: BoundingBox
+  bbox: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
   content: string
   style?: {
     font?: string
     fontSize?: number
     color?: string
   }
+  textRuns?: TextRun[]
+  crop?: ImageCrop  // ← Add this
+}
+
+export interface TextRun {
+  text: string
+  font: string
+  size: number
+  bold?: boolean
+  italic?: boolean
+  color: string
+}
+
+export interface SlideData {
+  slideIndex: number
+  elements: DoclingElement[]
+  speakerNotes?: string
+  unmappedText?: string
 }
 
 export interface SlideData {
@@ -56,26 +86,4 @@ export interface ExtractionProgressEvent {
   phase: ExtractionPhase
   progress: number
   message: string
-}
-
-export interface ElectronAPI {
-  selectPPTX: () => Promise<string | null>
-  getFileStats: (filePath: string) => Promise<{ size: number; mtimeMs: number } | null>
-  extractPPTX: (filePath: string) => Promise<ExtractionResult>
-  getSlideImage: (sessionId: string, slideIndex: number) => Promise<string | null>
-  getSlideData: (sessionId: string, slideIndex: number) => Promise<SlideData>
-  getRecentSessions: () => Promise<SessionMetadata[]>
-  resumeSession: (sessionId: string) => Promise<ExtractionResult>
-  updateSessionState: (sessionId: string, currentSlide: number) => Promise<boolean>
-  clearSession: (sessionId: string) => Promise<boolean>
-  onExtractionProgress: (callback: (event: ExtractionProgressEvent) => void) => () => void
-  onDoclingReady: (callback: (event: { sessionId: string }) => void) => () => void
-  onDoclingError: (callback: (event: { sessionId: string; message: string }) => void) => () => void
-  onLog: (callback: (event: { sessionId: string; message: string }) => void) => () => void
-}
-
-declare global {
-  interface Window {
-    electronAPI: ElectronAPI
-  }
 }

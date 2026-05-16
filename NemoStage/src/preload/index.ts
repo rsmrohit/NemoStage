@@ -1,22 +1,74 @@
-import { contextBridge } from 'electron'
-import { electronAPI } from '@electron-toolkit/preload'
+import { contextBridge, ipcRenderer } from 'electron'
+import type { ElectronAPI } from './index.d'
 
-// Custom APIs for renderer
-const api = {}
+const electronAPI: ElectronAPI = {
+  selectPPTX: () => ipcRenderer.invoke('dialog:openFile'),
+  getFileStats: (filePath) => ipcRenderer.invoke('file:getStats', filePath),
+  extractPPTX: (filePath) => ipcRenderer.invoke('pptx:extract', filePath),
+  getSlideImage: (sessionId, index) => ipcRenderer.invoke('pptx:getImage', sessionId, index),
+  getSlideData: (sessionId, index) => ipcRenderer.invoke('pptx:getData', sessionId, index),
+  getRecentSessions: () => ipcRenderer.invoke('pptx:getRecentSessions'),
+  resumeSession: (sessionId) => ipcRenderer.invoke('pptx:resumeSession', sessionId),
+  updateSessionState: (sessionId, currentSlide) =>
+    ipcRenderer.invoke('pptx:updateSessionState', sessionId, currentSlide),
+  clearSession: (sessionId) => ipcRenderer.invoke('pptx:clearSession', sessionId),
+  onExtractionProgress: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ): void => {
+      callback(payload)
+    }
 
-// Use `contextBridge` APIs to expose Electron APIs to
-// renderer only if context isolation is enabled, otherwise
-// just add to the DOM global.
-if (process.contextIsolated) {
-  try {
-    contextBridge.exposeInMainWorld('electron', electronAPI)
-    contextBridge.exposeInMainWorld('api', api)
-  } catch (error) {
-    console.error(error)
+    ipcRenderer.on('pptx:progress', listener)
+    return () => {
+      ipcRenderer.removeListener('pptx:progress', listener)
+    }
+  },
+  onDoclingReady: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ): void => {
+      callback(payload)
+    }
+
+    ipcRenderer.on('pptx:doclingReady', listener)
+    return () => {
+      ipcRenderer.removeListener('pptx:doclingReady', listener)
+    }
+  },
+  onDoclingError: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ): void => {
+      callback(payload)
+    }
+
+    ipcRenderer.on('pptx:doclingError', listener)
+    return () => {
+      ipcRenderer.removeListener('pptx:doclingError', listener)
+    }
+  },
+  onLog: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ): void => {
+      callback(payload)
+    }
+
+    ipcRenderer.on('pptx:log', listener)
+    return () => {
+      ipcRenderer.removeListener('pptx:log', listener)
+    }
   }
+}
+
+if (process.contextIsolated) {
+  contextBridge.exposeInMainWorld('electronAPI', electronAPI)
 } else {
-  // @ts-ignore (define in dts)
-  window.electron = electronAPI
-  // @ts-ignore (define in dts)
-  window.api = api
+  // @ts-ignore fallback for non-isolated contexts
+  window.electronAPI = electronAPI
 }

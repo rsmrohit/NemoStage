@@ -6,6 +6,7 @@ export default defineConfig({
   main: {},
   preload: {},
   renderer: {
+    assetsInclude: ['**/*.woff', '**/*.woff2', '**/*.ttf'],
     resolve: {
       alias: {
         '@renderer': resolve('src/renderer/src')
