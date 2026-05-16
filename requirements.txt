@@ -4,3 +4,5 @@ websockets
 numpy
 sounddevice
 noisereduce
+sentence-transformers
+chromadb

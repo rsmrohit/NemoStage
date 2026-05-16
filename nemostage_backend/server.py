@@ -1,9 +1,14 @@
 import asyncio
+import hashlib
+import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Any, Set
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -27,6 +32,14 @@ OPENCLAW_BIN = "/home/asus/.npm-global/bin/openclaw"
 ALLOWED_SIGNALS = {"confused", "interested", "lost"}
 REGISTERED_AGENTS = {"main", "livetranscript", "audience"}
 MAX_AGENT_SLIDE_TEXT_CHARS = 1200
+CHROMA_ROOT = "/home/asus/nemostage-chroma"
+DECK_INDEX_PATH = os.path.join(CHROMA_ROOT, "decks.json")
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+VECTOR_TOP_K = 5
+VECTOR_RELEVANCE_DISTANCE_THRESHOLD = 0.35
+
+_embedding_model = None
+_chroma_client = None
 
 
 class PresentationSlide(BaseModel):
@@ -65,9 +78,26 @@ class PresentationSession(BaseModel):
     last_agent_result: Any = None
     slide_generation_needed: bool = False
     coverage_status: str = "unknown"
+    deck_id: str | None = None
+    collection_name: str | None = None
+    vectorization_status: str = "unavailable"
+    chunks_indexed: int = 0
+    vectorization_error: str | None = None
+
+
+class DeckIndexInfo(BaseModel):
+    deck_id: str
+    collection_name: str
+    filename: str
+    sandbox_path: str = ""
+    vectorization_status: str
+    chunks_indexed: int = 0
+    vectorization_error: str | None = None
+    updated_at: float
 
 
 presentation_sessions: dict[str, PresentationSession] = {}
+deck_indexes_by_filename: dict[str, DeckIndexInfo] = {}
 
 
 class PresenterHub:
@@ -154,6 +184,255 @@ def save_pptx_to_sandbox(filename: str, content: bytes) -> dict:
         "container": container,
         "size_bytes": len(content),
     }
+
+
+def load_deck_index_manifest() -> None:
+    if deck_indexes_by_filename or not os.path.exists(DECK_INDEX_PATH):
+        return
+    try:
+        with open(DECK_INDEX_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for filename, data in raw.items():
+            deck_indexes_by_filename[filename] = DeckIndexInfo(**data)
+    except Exception:
+        # The server can still run without the manifest; upload will rebuild it.
+        return
+
+
+def persist_deck_index_manifest() -> None:
+    os.makedirs(CHROMA_ROOT, exist_ok=True)
+    with open(DECK_INDEX_PATH, "w", encoding="utf-8") as f:
+        json.dump(
+            {name: info.dict() for name, info in deck_indexes_by_filename.items()},
+            f,
+            indent=2,
+            sort_keys=True,
+        )
+
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    return _embedding_model
+
+
+def get_chroma_client():
+    global _chroma_client
+    if _chroma_client is None:
+        import chromadb
+
+        os.makedirs(CHROMA_ROOT, exist_ok=True)
+        _chroma_client = chromadb.PersistentClient(path=CHROMA_ROOT)
+    return _chroma_client
+
+
+def collection_name_for_deck(deck_id: str) -> str:
+    return f"presentation_{deck_id[:40]}"
+
+
+def extract_xml_text(xml: bytes) -> str:
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return ""
+    parts = []
+    for node in root.iter():
+        if node.tag.endswith("}t") and node.text:
+            parts.append(node.text)
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
+def slide_number_from_path(path: str) -> int:
+    match = re.search(r"slide(\d+)\.xml$", path)
+    return int(match.group(1)) if match else 0
+
+
+def extract_pptx_slide_documents(content: bytes) -> list[dict]:
+    documents = []
+    with zipfile.ZipFile(io.BytesIO(content)) as z:
+        names = set(z.namelist())
+        slide_paths = sorted(
+            [
+                name
+                for name in names
+                if re.match(r"ppt/slides/slide\d+\.xml$", name)
+            ],
+            key=slide_number_from_path,
+        )
+        for slide_path in slide_paths:
+            slide_number = slide_number_from_path(slide_path)
+            slide_text = extract_xml_text(z.read(slide_path))
+            notes_path = f"ppt/notesSlides/notesSlide{slide_number}.xml"
+            notes_text = extract_xml_text(z.read(notes_path)) if notes_path in names else ""
+            combined = "\n".join(
+                part
+                for part in [
+                    f"Slide {slide_number}",
+                    slide_text.strip(),
+                    f"Speaker notes:\n{notes_text.strip()}" if notes_text.strip() else "",
+                ]
+                if part
+            ).strip()
+            if not combined:
+                continue
+            title = next((line.strip() for line in slide_text.splitlines() if line.strip()), "")
+            documents.append(
+                {
+                    "slide_index": slide_number - 1,
+                    "slide_number": slide_number,
+                    "title": title[:200],
+                    "text": combined,
+                }
+            )
+
+    return documents
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    model = get_embedding_model()
+    embeddings = model.encode(texts, normalize_embeddings=True)
+    return embeddings.tolist()
+
+
+def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) -> DeckIndexInfo:
+    deck_id = hashlib.sha256(content).hexdigest()
+    collection_name = collection_name_for_deck(deck_id)
+    now = time.time()
+
+    try:
+        slide_documents = extract_pptx_slide_documents(content)
+        if not slide_documents:
+            raise ValueError("No slide text found to vectorize")
+
+        client = get_chroma_client()
+        try:
+            client.delete_collection(collection_name)
+        except Exception:
+            pass
+
+        collection = client.create_collection(
+            name=collection_name,
+            metadata={"deck_id": deck_id, "filename": filename, "hnsw:space": "cosine"},
+        )
+        texts = [doc["text"] for doc in slide_documents]
+        embeddings = embed_texts(texts)
+        collection.add(
+            ids=[f"{deck_id[:12]}-slide-{doc['slide_index']}" for doc in slide_documents],
+            documents=texts,
+            embeddings=embeddings,
+            metadatas=[
+                {
+                    "deck_id": deck_id,
+                    "filename": filename,
+                    "slide_index": doc["slide_index"],
+                    "slide_number": doc["slide_number"],
+                    "title": doc["title"],
+                }
+                for doc in slide_documents
+            ],
+        )
+        info = DeckIndexInfo(
+            deck_id=deck_id,
+            collection_name=collection_name,
+            filename=filename,
+            sandbox_path=sandbox_path,
+            vectorization_status="ready",
+            chunks_indexed=len(slide_documents),
+            updated_at=now,
+        )
+    except Exception as exc:
+        info = DeckIndexInfo(
+            deck_id=deck_id,
+            collection_name=collection_name,
+            filename=filename,
+            sandbox_path=sandbox_path,
+            vectorization_status="failed",
+            chunks_indexed=0,
+            vectorization_error=str(exc),
+            updated_at=now,
+        )
+
+    deck_indexes_by_filename[filename] = info
+    persist_deck_index_manifest()
+    return info
+
+
+def find_deck_index(filename: str) -> DeckIndexInfo | None:
+    load_deck_index_manifest()
+    if filename in deck_indexes_by_filename:
+        return deck_indexes_by_filename[filename]
+    return None
+
+
+def query_deck_vectors(session: PresentationSession, transcript: str) -> dict:
+    if not session.deck_id or not session.collection_name:
+        return {
+            "status": "unavailable",
+            "error": "No vector index is bound to this presentation session",
+            "matches": [],
+        }
+    if session.vectorization_status != "ready":
+        return {
+            "status": session.vectorization_status,
+            "error": session.vectorization_error or "Vector index is not ready",
+            "matches": [],
+        }
+
+    try:
+        client = get_chroma_client()
+        collection = client.get_collection(session.collection_name)
+        query_embedding = embed_texts([transcript])[0]
+        result = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=VECTOR_TOP_K,
+            where={"deck_id": session.deck_id},
+            include=["documents", "metadatas", "distances"],
+        )
+        documents = result.get("documents", [[]])[0]
+        metadatas = result.get("metadatas", [[]])[0]
+        distances = result.get("distances", [[]])[0]
+        matches = []
+        for document, metadata, distance in zip(documents, metadatas, distances):
+            matches.append(
+                {
+                    "document": document,
+                    "metadata": metadata or {},
+                    "distance": float(distance),
+                    "strong_match": float(distance) <= VECTOR_RELEVANCE_DISTANCE_THRESHOLD,
+                }
+            )
+        return {
+            "status": "ready",
+            "collection_name": session.collection_name,
+            "deck_id": session.deck_id,
+            "matches": matches,
+            "best_distance": matches[0]["distance"] if matches else None,
+            "threshold": VECTOR_RELEVANCE_DISTANCE_THRESHOLD,
+        }
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc), "matches": []}
+
+
+def format_vector_matches_for_agent(vector_search: dict, current_slide: int) -> str:
+    matches = vector_search.get("matches", [])
+    if not matches:
+        return "[no vector matches]"
+    blocks = []
+    for match in matches:
+        metadata = match.get("metadata", {})
+        marker = "CURRENT" if metadata.get("slide_index") == current_slide else "OTHER"
+        strength = "strong" if match.get("strong_match") else "weak"
+        text = compact_agent_text(match.get("document", ""), 1800)
+        blocks.append(
+            f"[{marker} {strength}_vector_match distance={match.get('distance'):.4f}] "
+            f"slide_index={metadata.get('slide_index')}, slide_number={metadata.get('slide_number')}\n"
+            f"title: {metadata.get('title') or '[empty]'}\n"
+            f"text: {text or '[empty]'}"
+        )
+    return "\n\n".join(blocks)
 
 
 def parse_json_reply(reply: str) -> Any:
@@ -371,6 +650,7 @@ async def start_presentation(payload: PresentationStartRequest):
         raise HTTPException(status_code=400, detail="current_slide is outside slide_count")
 
     now = time.time()
+    deck_index = find_deck_index(payload.file_name)
     session = PresentationSession(
         presentation_id=session_id,
         file_name=payload.file_name,
@@ -379,9 +659,27 @@ async def start_presentation(payload: PresentationStartRequest):
         slides=payload.slides,
         started_at=now,
         updated_at=now,
+        deck_id=deck_index.deck_id if deck_index else None,
+        collection_name=deck_index.collection_name if deck_index else None,
+        vectorization_status=deck_index.vectorization_status if deck_index else "unavailable",
+        chunks_indexed=deck_index.chunks_indexed if deck_index else 0,
+        vectorization_error=(
+            deck_index.vectorization_error
+            if deck_index
+            else f"No vector index found for uploaded file: {payload.file_name}"
+        ),
     )
     presentation_sessions[session_id] = session
-    return {"status": "ok", "presentation_id": session_id}
+    return {
+        "status": "ok",
+        "presentation_id": session_id,
+        "deck_id": session.deck_id,
+        "collection_name": session.collection_name,
+        "vectorization_enabled": session.vectorization_status == "ready",
+        "vectorization_status": session.vectorization_status,
+        "chunks_indexed": session.chunks_indexed,
+        "vectorization_error": session.vectorization_error,
+    }
 
 
 @app.post("/presentation/slide")
@@ -403,18 +701,55 @@ async def analyze_presentation_transcript(payload: PresentationTranscriptRequest
     if not transcript:
         raise HTTPException(status_code=400, detail="empty transcript")
 
-    presentation_outline = build_presentation_outline(session)
+    vector_search = query_deck_vectors(session, transcript)
+    if vector_search.get("status") != "ready":
+        session.last_agent_result = {"vector_error": vector_search.get("error", "Vector search unavailable")}
+        session.slide_generation_needed = False
+        session.coverage_status = "unknown"
+        session.updated_at = time.time()
+        presentation_sessions[payload.presentation_id] = session
+        return JSONResponse({
+            "status": "ok",
+            "presentation_id": payload.presentation_id,
+            "current_slide": session.current_slide,
+            "agent_result": session.last_agent_result,
+            "coverage_status": "unknown",
+            "slide_generation_needed": False,
+            "vector_search": vector_search,
+        })
+
+    if not vector_search.get("matches"):
+        session.last_agent_result = {"vector_error": "No vector matches returned for transcript"}
+        session.slide_generation_needed = False
+        session.coverage_status = "unknown"
+        session.updated_at = time.time()
+        presentation_sessions[payload.presentation_id] = session
+        return JSONResponse({
+            "status": "ok",
+            "presentation_id": payload.presentation_id,
+            "current_slide": session.current_slide,
+            "agent_result": session.last_agent_result,
+            "coverage_status": "unknown",
+            "slide_generation_needed": False,
+            "vector_search": vector_search,
+        })
+
+    vector_context = format_vector_matches_for_agent(vector_search, session.current_slide)
     prompt = (
-        "You are tracking a live presentation. Use the in-memory presentation outline below; "
-        "do not open files or run tools. Classify the speaker's transcript chunk into exactly "
+        "You are tracking a live presentation. Use only the vector-retrieved slide context below; "
+        "do not open files, run tools, or assume content from slides that were not retrieved. "
+        "Classify the speaker's transcript chunk into exactly "
         "one coverage_status:\n"
         "- current_slide: the content is covered by the current slide.\n"
-        "- other_slide: the content is not covered by the current slide, but is covered by a "
-        "different slide in the presentation, including a future slide.\n"
-        "- not_covered: the content is not covered by any slide in the presentation.\n\n"
+        "- other_slide: the content is not covered by the current slide, but is covered by one "
+        "of the retrieved slides from this same presentation, including a future slide.\n"
+        "- not_covered: the content is not covered by the retrieved slide context, or the only "
+        "matches are weak and do not actually support the transcript topic.\n\n"
         "If coverage_status is other_slide, set matched_slide to the best matching slide_index. "
         "If not_covered, set matched_slide to null and topic to the missing topic.\n\n"
-        f"Presentation outline:\n{presentation_outline}\n\n"
+        f"Current slide_index: {session.current_slide}\n"
+        f"Vector search threshold: distance <= {VECTOR_RELEVANCE_DISTANCE_THRESHOLD} is strong; higher is weak.\n\n"
+        f"Vector-retrieved slide context:\n{vector_context}\n\n"
         f"Transcript chunk:\n{transcript}\n\n"
         "Return exactly one JSON object and nothing else. Schema:\n"
         '{"coverage_status": "current_slide|other_slide|not_covered", '
@@ -452,6 +787,21 @@ async def analyze_presentation_transcript(payload: PresentationTranscriptRequest
         "agent_result": agent_result,
         "coverage_status": coverage_status,
         "slide_generation_needed": slide_generation_needed,
+        "vector_search": {
+            "status": vector_search.get("status"),
+            "collection_name": vector_search.get("collection_name"),
+            "deck_id": vector_search.get("deck_id"),
+            "best_distance": vector_search.get("best_distance"),
+            "threshold": vector_search.get("threshold"),
+            "matches": [
+                {
+                    "metadata": match.get("metadata", {}),
+                    "distance": match.get("distance"),
+                    "strong_match": match.get("strong_match"),
+                }
+                for match in vector_search.get("matches", [])
+            ],
+        },
     })
 
 
@@ -464,9 +814,16 @@ async def get_presentation(presentation_id: str):
 async def upload_pptx_to_sandbox(file: UploadFile = File(...)):
     content = await file.read()
     upload = save_pptx_to_sandbox(file.filename, content)
+    deck_index = rebuild_deck_vector_index(upload["filename"], upload["sandbox_path"], content)
     return JSONResponse({
         "status": "ok",
         **upload,
+        "deck_id": deck_index.deck_id,
+        "collection_name": deck_index.collection_name,
+        "vectorization_enabled": deck_index.vectorization_status == "ready",
+        "vectorization_status": deck_index.vectorization_status,
+        "chunks_indexed": deck_index.chunks_indexed,
+        "vectorization_error": deck_index.vectorization_error,
     })
 
 
@@ -474,6 +831,7 @@ async def upload_pptx_to_sandbox(file: UploadFile = File(...)):
 async def upload_pptx(file: UploadFile = File(...)):
     content = await file.read()
     upload = save_pptx_to_sandbox(file.filename, content)
+    deck_index = rebuild_deck_vector_index(upload["filename"], upload["sandbox_path"], content)
     dest = upload["sandbox_path"]
 
     prompt = (
@@ -498,6 +856,12 @@ async def upload_pptx(file: UploadFile = File(...)):
         "filename": upload["filename"],
         "sandbox_path": dest,
         "container": upload["container"],
+        "deck_id": deck_index.deck_id,
+        "collection_name": deck_index.collection_name,
+        "vectorization_enabled": deck_index.vectorization_status == "ready",
+        "vectorization_status": deck_index.vectorization_status,
+        "chunks_indexed": deck_index.chunks_indexed,
+        "vectorization_error": deck_index.vectorization_error,
         "summary": summary,
     })
 

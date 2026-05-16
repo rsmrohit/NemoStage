@@ -27,6 +27,7 @@ const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
 const sessions = new Map<string, SessionRuntime>()
 const doclingManifests = new Map<string, PptxManifest>()
+const parsingSessions = new Set<string>()
 
 function emitToRenderer(window: BrowserWindow | null, channel: string, payload: unknown): void {
   if (window && !window.isDestroyed()) {
@@ -110,6 +111,65 @@ async function hydrateSessionFromDisk(sessionId: string): Promise<SessionRuntime
 
   sessions.set(sessionId, runtime)
   return runtime
+}
+
+async function refreshParseStatusFromDisk(runtime: SessionRuntime): Promise<void> {
+  const manifestExists = await fs.pathExists(runtime.manifestPath)
+  if (!manifestExists) {
+    return
+  }
+
+  runtime.result.doclingStatus = 'ready'
+  if (!doclingManifests.has(runtime.sessionId)) {
+    const manifest = await fs.readJson(runtime.manifestPath).catch(() => null)
+    if (manifest) {
+      doclingManifests.set(runtime.sessionId, manifest)
+    }
+  }
+}
+
+function startStructureParse(
+  runtime: SessionRuntime,
+  filePath: string,
+  getMainWindow: () => BrowserWindow | null
+): void {
+  if (parsingSessions.has(runtime.sessionId)) {
+    return
+  }
+
+  parsingSessions.add(runtime.sessionId)
+  runtime.result.doclingStatus = 'pending'
+  emitToRenderer(getMainWindow(), 'pptx:progress', {
+    sessionId: runtime.sessionId,
+    phase: 'parsing_structure',
+    progress: 0.9,
+    message: 'Parsing slide structure'
+  })
+
+  void parsePPTXStructure(filePath, runtime.sessionDir)
+    .then(async (manifest) => {
+      await fs.writeJson(runtime.manifestPath, manifest, { spaces: 2 })
+      doclingManifests.set(runtime.sessionId, manifest)
+
+      const current = sessions.get(runtime.sessionId)
+      if (current) {
+        current.result.doclingStatus = 'ready'
+      }
+      emitToRenderer(getMainWindow(), 'pptx:doclingReady', { sessionId: runtime.sessionId })
+    })
+    .catch((error) => {
+      const current = sessions.get(runtime.sessionId)
+      if (current) {
+        current.result.doclingStatus = 'failed'
+      }
+      emitToRenderer(getMainWindow(), 'pptx:doclingError', {
+        sessionId: runtime.sessionId,
+        message: (error as Error).message
+      })
+    })
+    .finally(() => {
+      parsingSessions.delete(runtime.sessionId)
+    })
 }
 
 export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): void {
@@ -219,30 +279,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
     sessions.set(sessionId, runtime)
 
-    void parsePPTXStructure(filePath, sessionDir)
-      .then(async (manifest) => {
-        // Save to manifest.json
-        await fs.writeJson(manifestPath, manifest, { spaces: 2 })
-        
-        // Store in memory
-        doclingManifests.set(sessionId, manifest)  // Cast temporarily
-        
-        const current = sessions.get(sessionId)
-        if (current) {
-          current.result.doclingStatus = 'ready'
-        }
-        emitToRenderer(getMainWindow(), 'pptx:doclingReady', { sessionId })
-      })
-      .catch((error) => {
-        const current = sessions.get(sessionId)
-        if (current) {
-          current.result.doclingStatus = 'failed'
-        }
-        emitToRenderer(getMainWindow(), 'pptx:doclingError', {
-          sessionId,
-          message: (error as Error).message
-        })
-      })
+    startStructureParse(runtime, filePath, getMainWindow)
 
     emitProgress({ phase: 'extracting_images', progress: 1, message: 'Preview ready' })
     return result
@@ -352,6 +389,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       throw new Error('Session not found')
     }
 
+    await refreshParseStatusFromDisk(runtime)
+
     return {
       doclingStatus: runtime.result.doclingStatus,
       hasManifest: doclingManifests.has(sessionId) || (await fs.pathExists(runtime.manifestPath))
@@ -364,6 +403,14 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     const runtime = sessions.get(sessionId) ?? (await hydrateSessionFromDisk(sessionId))
     if (!runtime) {
       throw new Error('Session not found')
+    }
+
+    await refreshParseStatusFromDisk(runtime)
+    if (runtime.result.doclingStatus !== 'ready') {
+      const fileExists = await fs.pathExists(runtime.result.filePath)
+      if (fileExists) {
+        startStructureParse(runtime, runtime.result.filePath, getMainWindow)
+      }
     }
 
     await touchSession(sessionId)

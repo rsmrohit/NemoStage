@@ -64,6 +64,12 @@ export interface SandboxUploadResult {
   sandbox_path: string
   container: string
   size_bytes: number
+  deck_id?: string | null
+  collection_name?: string | null
+  vectorization_enabled?: boolean
+  vectorization_status?: 'ready' | 'failed' | 'unavailable'
+  chunks_indexed?: number
+  vectorization_error?: string | null
 }
 
 export interface ElectronAPI {

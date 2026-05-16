@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { FileSelector } from './components/FileSelector'
 import { NavigationControls } from './components/NavigationControls'
 import { SlideCanvas } from './components/SlideCanvas'
 import { SlideGallery } from './components/SlideGallery'
+import { AudienceQrSlide } from './components/AudienceQrSlide'
 import {
+  NEMOSTAGE_AUDIENCE_URL,
   deleteSandboxPresentation,
   listSandboxPresentations,
   sendPresentationTranscript,
@@ -12,6 +14,7 @@ import {
   summarizeSlideData,
   updatePresentationSlide
 } from './services/nemostageApi'
+import type { VectorizationFields } from './services/nemostageApi'
 import { usePresentationStore } from './store/presentationStore'
 import type { ExtractionPhase, SessionMetadata, SlideData } from './types/presentation'
 
@@ -46,8 +49,6 @@ function AppContent(): React.JSX.Element {
     setSlideData,
     setDoclingStatus,
     goToSlide,
-    nextSlide,
-    previousSlide,
     reset
   } = usePresentationStore()
 
@@ -63,9 +64,15 @@ function AppContent(): React.JSX.Element {
   const [liveAgentStatus, setLiveAgentStatus] = useState<LiveAgentStatus>('idle')
   const [liveAgentMessage, setLiveAgentMessage] = useState('No transcript analyzed yet.')
   const [slideGenerationNeeded, setSlideGenerationNeeded] = useState(false)
+  const [vectorizationInfo, setVectorizationInfo] = useState<VectorizationFields | null>(null)
+  const [liveSlideIndex, setLiveSlideIndex] = useState(0)
 
   const currentSlideImage = slides[currentSlide]?.imagePaths[0] ?? null
-  const currentSlideData = slideData[currentSlide] ?? null
+  const liveTotalSlides = totalSlides > 0 ? totalSlides + 1 : 0
+  const isAudienceQrSlide = mode === 'live' && liveSlideIndex === 0
+  const liveDeckSlideIndex = Math.max(liveSlideIndex - 1, 0)
+  const liveSlideImage = isAudienceQrSlide ? null : (slides[liveDeckSlideIndex]?.imagePaths[0] ?? null)
+  const liveSlideData = isAudienceQrSlide ? null : (slideData[liveDeckSlideIndex] ?? null)
 
   const loadRecentSessions = async (): Promise<void> => {
     try {
@@ -157,6 +164,23 @@ function AppContent(): React.JSX.Element {
     })
   }, [currentSlide, slides])
 
+  const goToLiveSlide = useCallback((index: number): void => {
+    const boundedIndex = Math.max(0, Math.min(index, Math.max(liveTotalSlides - 1, 0)))
+    setLiveSlideIndex(boundedIndex)
+
+    if (boundedIndex > 0) {
+      goToSlide(boundedIndex - 1)
+    }
+  }, [goToSlide, liveTotalSlides])
+
+  const nextLiveSlide = useCallback((): void => {
+    goToLiveSlide(liveSlideIndex + 1)
+  }, [goToLiveSlide, liveSlideIndex])
+
+  const previousLiveSlide = useCallback((): void => {
+    goToLiveSlide(liveSlideIndex - 1)
+  }, [goToLiveSlide, liveSlideIndex])
+
   useEffect(() => {
     if (mode !== 'live') {
       return
@@ -164,10 +188,10 @@ function AppContent(): React.JSX.Element {
 
     const handleKeyPress = (event: KeyboardEvent): void => {
       if (event.key === 'ArrowRight') {
-        nextSlide()
+        nextLiveSlide()
       }
       if (event.key === 'ArrowLeft') {
-        previousSlide()
+        previousLiveSlide()
       }
       if (event.key === 'Escape') {
         setMode('gallery')
@@ -176,7 +200,7 @@ function AppContent(): React.JSX.Element {
 
     window.addEventListener('keydown', handleKeyPress)
     return () => window.removeEventListener('keydown', handleKeyPress)
-  }, [mode, nextSlide, previousSlide])
+  }, [mode, nextLiveSlide, previousLiveSlide])
 
   useEffect(() => {
     if (!sessionId) {
@@ -255,14 +279,19 @@ function AppContent(): React.JSX.Element {
 
     try {
       const result = await window.electronAPI.extractPPTX(filePath)
-      setStatusMessage('Uploading presentation to sandbox...')
-      await window.electronAPI.uploadPPTXToSandbox(filePath)
+      setStatusMessage('Uploading and vectorizing presentation...')
+      const upload = await window.electronAPI.uploadPPTXToSandbox(filePath)
+      setVectorizationInfo(upload)
       setExtraction(result)
       setMode('gallery')
       setStatusMessage(
-        result.doclingStatus === 'pending'
-          ? 'Preview ready. Parsing structure in background.'
-          : 'Ready'
+        upload.vectorization_status === 'ready'
+          ? `Slide vector index ready (${upload.chunks_indexed ?? 0} chunks).`
+          : upload.vectorization_error
+            ? `Vector search ${upload.vectorization_status ?? 'unavailable'}: ${upload.vectorization_error}`
+            : result.doclingStatus === 'pending'
+              ? 'Preview ready. Parsing structure in background.'
+              : 'Ready'
       )
       setProgress(1)
       setExtractionPhase('ready')
@@ -283,6 +312,7 @@ function AppContent(): React.JSX.Element {
       setMode('gallery')
       setExtractionPhase('ready')
       setProgress(1)
+      setVectorizationInfo(null)
     } catch (error) {
       setErrorMessage((error as Error).message)
     }
@@ -308,6 +338,7 @@ function AppContent(): React.JSX.Element {
       setLiveAgentStatus('idle')
       setLiveAgentMessage('No transcript analyzed yet.')
       setSlideGenerationNeeded(false)
+      setVectorizationInfo(null)
       setStatusMessage('Session cleared')
     }
   }
@@ -351,13 +382,20 @@ function AppContent(): React.JSX.Element {
         session_id: sessionId,
         file_name: usePresentationStore.getState().fileName ?? '',
         slide_count: totalSlides,
-        current_slide: currentSlide,
+        current_slide: 0,
         slides: presentationSlides
       })
 
       setPresentationId(result.presentation_id)
+      setVectorizationInfo(result)
+      setLiveSlideIndex(0)
+      goToSlide(0)
       setLiveAgentStatus('ready')
-      setLiveAgentMessage('Live transcript agent ready.')
+      setLiveAgentMessage(
+        result.vectorization_status === 'ready'
+          ? `Live transcript agent ready. Using isolated vector index (${result.chunks_indexed ?? 0} chunks).`
+          : `Live transcript agent ready, but vector search is ${result.vectorization_status ?? 'unavailable'}.`
+      )
       setMode('live')
     } catch (error) {
       setLiveAgentStatus('error')
@@ -478,10 +516,10 @@ function AppContent(): React.JSX.Element {
         {mode === 'live' && (
           <div className="live-mode">
             <NavigationControls
-              currentSlide={currentSlide}
-              totalSlides={totalSlides}
-              onNext={nextSlide}
-              onPrevious={previousSlide}
+              currentSlide={liveSlideIndex}
+              totalSlides={liveTotalSlides}
+              onNext={nextLiveSlide}
+              onPrevious={previousLiveSlide}
               onExit={() => setMode('gallery')}
               sidebarOpen={sidebarOpen}
               onToggleSidebar={() => setSidebarOpen((state) => !state)}
@@ -490,30 +528,42 @@ function AppContent(): React.JSX.Element {
             <div className={`live-layout ${sidebarOpen ? '' : 'no-sidebar'}`}>
               {sidebarOpen && (
                 <aside className="thumbnail-sidebar">
+                  <button
+                    type="button"
+                    className={`thumb-mini audience-thumb ${liveSlideIndex === 0 ? 'active' : ''}`}
+                    onClick={() => goToLiveSlide(0)}
+                  >
+                    <div className="audience-thumb-preview">QR</div>
+                    <span>1</span>
+                  </button>
                   {slides.map((slide, index) => (
                     <button
                       key={slide.slideIndex}
                       type="button"
-                      className={`thumb-mini ${index === currentSlide ? 'active' : ''}`}
-                      onClick={() => goToSlide(index)}
+                      className={`thumb-mini ${index + 1 === liveSlideIndex ? 'active' : ''}`}
+                      onClick={() => goToLiveSlide(index + 1)}
                     >
                       {slide.thumbnailPath ? (
-                        <img src={slide.thumbnailPath} alt={`Slide ${index + 1}`} />
+                        <img src={slide.thumbnailPath} alt={`Slide ${index + 2}`} />
                       ) : (
                         <span>No preview</span>
                       )}
-                      <span>{index + 1}</span>
+                      <span>{index + 2}</span>
                     </button>
                   ))}
                 </aside>
               )}
 
               <div className="live-stage">
-                <SlideCanvas
-                  currentSlide={currentSlide}
-                  slideData={currentSlideData}
-                  slideImage={currentSlideImage}
-                />
+                {isAudienceQrSlide ? (
+                  <AudienceQrSlide audienceUrl={NEMOSTAGE_AUDIENCE_URL} />
+                ) : (
+                  <SlideCanvas
+                    currentSlide={liveDeckSlideIndex}
+                    slideData={liveSlideData}
+                    slideImage={liveSlideImage}
+                  />
+                )}
 
                 <aside className="live-agent-panel" aria-label="Live transcript agent">
                   <div className="live-agent-header">
@@ -529,6 +579,18 @@ function AppContent(): React.JSX.Element {
 
                   {slideGenerationNeeded && (
                     <div className="generation-alert">Slide generation needed</div>
+                  )}
+
+                  {vectorizationInfo && (
+                    <div
+                      className={`vector-index-alert ${
+                        vectorizationInfo.vectorization_status === 'ready' ? 'ready' : 'warning'
+                      }`}
+                    >
+                      {vectorizationInfo.vectorization_status === 'ready'
+                        ? `Vector index ready (${vectorizationInfo.chunks_indexed ?? 0} chunks)`
+                        : `Vector search ${vectorizationInfo.vectorization_status ?? 'unavailable'}`}
+                    </div>
                   )}
 
                   <p className="live-agent-message">{liveAgentMessage}</p>

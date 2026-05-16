@@ -1,6 +1,7 @@
 import type { SlideData } from '../types/presentation'
 
 export const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
+export const NEMOSTAGE_AUDIENCE_URL = `${NEMOSTAGE_BACKEND_URL}/audience`
 
 export interface PresentationSlidePayload {
   slide_index: number
@@ -36,6 +37,18 @@ export interface TranscriptAnalysisResponse {
   agent_result: TranscriptAgentResult
   coverage_status: 'current_slide' | 'other_slide' | 'not_covered' | 'unknown'
   slide_generation_needed: boolean
+  vector_search?: {
+    status: string
+    collection_name?: string
+    deck_id?: string
+    best_distance?: number | null
+    threshold?: number
+    matches?: Array<{
+      metadata: Record<string, unknown>
+      distance: number
+      strong_match: boolean
+    }>
+  }
 }
 
 export interface SandboxPresentation {
@@ -43,6 +56,15 @@ export interface SandboxPresentation {
   size_bytes: number
   uploaded_at: string
   sandbox_path: string
+}
+
+export interface VectorizationFields {
+  deck_id?: string | null
+  collection_name?: string | null
+  vectorization_enabled?: boolean
+  vectorization_status?: 'ready' | 'failed' | 'unavailable'
+  chunks_indexed?: number
+  vectorization_error?: string | null
 }
 
 async function getJson<TResponse>(path: string): Promise<TResponse> {
@@ -89,7 +111,7 @@ async function deleteJson<TResponse>(path: string): Promise<TResponse> {
 export function startPresentation(payload: StartPresentationPayload): Promise<{
   status: string
   presentation_id: string
-}> {
+} & VectorizationFields> {
   return postJson('/presentation/start', payload)
 }
 
