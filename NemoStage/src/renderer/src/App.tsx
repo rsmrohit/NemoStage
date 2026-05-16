@@ -111,7 +111,7 @@ function AppContent(): React.JSX.Element {
   const [latestTranscriptEvent, setLatestTranscriptEvent] = useState<TranscriptFileEvent | null>(
     null
   )
-  const [transcriptBuffer, setTranscriptBuffer] = useState<string[]>([])
+  const [, setTranscriptBuffer] = useState<string[]>([])
   const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const BATCH_INTERVAL_MS = 20000 // 20 seconds
   const presentationIdRef = useRef<string | null>(null)
@@ -119,6 +119,11 @@ function AppContent(): React.JSX.Element {
   const [injectedSlides, setInjectedSlides] = useState<GeneratedSlide[]>([])
   const slideGenPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [activeQA, setActiveQA] = useState<QAEntry | null>(null)
+  const [latestQA, setLatestQA] = useState<QAEntry | null>(null)
+  const [publicQADisplayEnabled, setPublicQADisplayEnabled] = useState(() => {
+    return window.localStorage.getItem('nemostage.publicQADisplayEnabled') === 'true'
+  })
+  const publicQADisplayEnabledRef = useRef(publicQADisplayEnabled)
   const qaLastPollTsRef = useRef<number>(0)
   const qaPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -149,6 +154,21 @@ function AppContent(): React.JSX.Element {
     presentationIdRef.current = presentationId
   }, [presentationId])
 
+  useEffect(() => {
+    publicQADisplayEnabledRef.current = publicQADisplayEnabled
+    window.localStorage.setItem(
+      'nemostage.publicQADisplayEnabled',
+      publicQADisplayEnabled ? 'true' : 'false'
+    )
+    if (!publicQADisplayEnabled) {
+      setActiveQA(null)
+      return
+    }
+    if (latestQA) {
+      setActiveQA(latestQA)
+    }
+  }, [publicQADisplayEnabled, latestQA])
+
   // Q&A polling — active only in live mode; also cleans up slide-gen poll on mode exit
   useEffect(() => {
     if (mode !== 'live') {
@@ -161,7 +181,10 @@ function AppContent(): React.JSX.Element {
         const { qa } = await getRecentQA(qaLastPollTsRef.current)
         if (qa.length > 0) {
           const latest = qa[qa.length - 1]
-          setActiveQA(latest)
+          setLatestQA(latest)
+          if (publicQADisplayEnabledRef.current) {
+            setActiveQA(latest)
+          }
           qaLastPollTsRef.current = latest.ts
         }
       } catch {
@@ -524,7 +547,7 @@ function AppContent(): React.JSX.Element {
     }
   }, [addToTranscriptBuffer])
 
-  const startExtraction = async (filePath: string): Promise<void> => {
+  const startExtraction = async (filePath: string, materialPaths: string[] = []): Promise<void> => {
     setErrorMessage(null)
     setStatusMessage('Starting extraction...')
     setExtractionPhase('extracting_images')
@@ -534,12 +557,27 @@ function AppContent(): React.JSX.Element {
       const result = await window.electronAPI.extractPPTX(filePath)
       setStatusMessage('Uploading and vectorizing presentation...')
       const upload = await window.electronAPI.uploadPPTXToSandbox(filePath)
+      let materialStatus = ''
+      if (materialPaths.length > 0) {
+        setStatusMessage('Uploading audience Q&A materials...')
+        const materialUpload = await window.electronAPI.uploadPresentationMaterials(
+          upload.filename,
+          materialPaths
+        )
+        upload.material_files_indexed = materialUpload.material_files_indexed
+        upload.material_chunks_indexed = materialUpload.material_chunks_indexed
+        upload.material_sandbox_dir = materialUpload.material_sandbox_dir
+        materialStatus = ` ${materialUpload.material_files_indexed} material file${materialUpload.material_files_indexed === 1 ? '' : 's'} indexed for audience Q&A.`
+        if (materialUpload.errors?.length) {
+          materialStatus += ` ${materialUpload.errors.length} file${materialUpload.errors.length === 1 ? '' : 's'} had no supported text.`
+        }
+      }
       setVectorizationInfo(upload)
       setExtraction(result)
       setMode('gallery')
       setStatusMessage(
         upload.vectorization_status === 'ready'
-          ? `Slide vector index ready (${upload.chunks_indexed ?? 0} chunks).`
+          ? `Slide vector index ready (${upload.chunks_indexed ?? 0} chunks).${materialStatus}`
           : upload.vectorization_error
             ? `Vector search ${upload.vectorization_status ?? 'unavailable'}: ${upload.vectorization_error}`
             : result.doclingStatus === 'pending'
@@ -979,9 +1017,25 @@ function AppContent(): React.JSX.Element {
                         ? 'generation needed'
                         : liveAgentStatus === 'covered-elsewhere'
                           ? 'covered elsewhere'
-                          : liveAgentStatus}
+                        : liveAgentStatus}
                     </span>
                   </div>
+
+                  <label className="public-qa-toggle">
+                    <input
+                      type="checkbox"
+                      checked={publicQADisplayEnabled}
+                      onChange={(event) => setPublicQADisplayEnabled(event.currentTarget.checked)}
+                    />
+                    <span>
+                      <strong>Public Q&amp;A display</strong>
+                      <small>
+                        {publicQADisplayEnabled
+                          ? 'Answers also appear on the slideshow.'
+                          : 'Answers go back to audience devices only.'}
+                      </small>
+                    </span>
+                  </label>
 
                   {slideGenerationNeeded && (
                     <div className="generation-alert">Slide generation needed</div>
@@ -994,7 +1048,11 @@ function AppContent(): React.JSX.Element {
                       }`}
                     >
                       {vectorizationInfo.vectorization_status === 'ready'
-                        ? `Vector index ready (${vectorizationInfo.chunks_indexed ?? 0} chunks)`
+                        ? `Vector index ready (${vectorizationInfo.chunks_indexed ?? 0} slide chunks${
+                            vectorizationInfo.material_chunks_indexed
+                              ? `, ${vectorizationInfo.material_chunks_indexed} material chunks`
+                              : ''
+                          })`
                         : `Vector search ${vectorizationInfo.vectorization_status ?? 'unavailable'}`}
                     </div>
                   )}

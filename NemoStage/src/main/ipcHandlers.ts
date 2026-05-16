@@ -360,6 +360,25 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     return selectedPath
   })
 
+  ipcMain.handle('dialog:openMaterials', async () => {
+    const window = getMainWindow()
+    const dialogOptions: OpenDialogOptions = {
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {
+          name: 'Q&A Materials',
+          extensions: ['txt', 'md', 'csv', 'tsv', 'json', 'jsonl', 'docx', 'pptx', 'html', 'htm', 'xml', 'yaml', 'yml']
+        },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    }
+    const result = window
+      ? await dialog.showOpenDialog(window, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions)
+
+    return result.canceled ? [] : result.filePaths
+  })
+
   ipcMain.handle('file:getStats', async (_event, filePath: string) => {
     const stat = await fs.stat(filePath).catch(() => null)
     if (!stat || !stat.isFile()) {
@@ -397,6 +416,54 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
     return response.json()
   })
+
+  ipcMain.handle(
+    'pptx:uploadPresentationMaterials',
+    async (_event, presentationFilename: string, filePaths: string[]) => {
+      if (!presentationFilename.toLowerCase().endsWith('.pptx')) {
+        throw new Error('A PPTX presentation must be uploaded before materials.')
+      }
+      if (!Array.isArray(filePaths) || filePaths.length === 0) {
+        return {
+          status: 'ok',
+          presentation_filename: presentationFilename,
+          sandbox_dir: '',
+          material_sandbox_dir: '',
+          material_files_indexed: 0,
+          material_chunks_indexed: 0,
+          files: []
+        }
+      }
+
+      const formData = new FormData()
+      formData.append('presentation_filename', presentationFilename)
+
+      for (const filePath of filePaths) {
+        const stat = await fs.stat(filePath)
+        if (!stat.isFile()) {
+          throw new Error(`Material path is not a file: ${filePath}`)
+        }
+        const bytes = await fs.readFile(filePath)
+        formData.append(
+          'files',
+          new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' }),
+          path.basename(filePath)
+        )
+      }
+
+      const response = await fetch(`${NEMOSTAGE_BACKEND_URL}/sandbox/presentation-materials`, {
+        method: 'POST',
+        body: formData
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        throw new Error(text || `Material upload failed: ${response.status}`)
+      }
+
+      return response.json()
+    }
+  )
 
   ipcMain.handle('pptx:extract', async (_event, filePath: string) => {
     const warnings = await validatePptxFile(filePath)

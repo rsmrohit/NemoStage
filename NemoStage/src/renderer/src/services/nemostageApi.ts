@@ -65,6 +65,9 @@ export interface VectorizationFields {
   vectorization_status?: 'ready' | 'failed' | 'unavailable'
   chunks_indexed?: number
   vectorization_error?: string | null
+  material_files_indexed?: number
+  material_chunks_indexed?: number
+  material_sandbox_dir?: string
 }
 
 async function getJson<TResponse>(path: string): Promise<TResponse> {

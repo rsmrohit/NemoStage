@@ -8,7 +8,7 @@ interface FileMetadata {
 }
 
 interface FileSelectorProps {
-  onSelect: (path: string) => void
+  onSelect: (path: string, materialPaths: string[]) => void
 }
 
 function formatBytes(bytes: number): string {
@@ -24,6 +24,8 @@ function formatBytes(bytes: number): string {
 
 export function FileSelector({ onSelect }: FileSelectorProps): React.JSX.Element {
   const [metadata, setMetadata] = useState<FileMetadata | null>(null)
+  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const [materialPaths, setMaterialPaths] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const dropHint = useMemo(() => {
@@ -52,8 +54,9 @@ export function FileSelector({ onSelect }: FileSelectorProps): React.JSX.Element
             })
           : 'Unknown date'
       })
+      setSelectedPath(filePath)
       setError(null)
-      onSelect(filePath)
+      onSelect(filePath, materialPaths)
     } catch {
       setMetadata({
         name: filePath.split(/[\\/]/).pop() ?? filePath,
@@ -61,8 +64,17 @@ export function FileSelector({ onSelect }: FileSelectorProps): React.JSX.Element
         sizeLabel: 'Unknown size',
         lastModified: 'Unknown date'
       })
+      setSelectedPath(filePath)
       setError(null)
-      onSelect(filePath)
+      onSelect(filePath, materialPaths)
+    }
+  }
+
+  const handleSelectMaterials = async (): Promise<void> => {
+    const paths = await window.electronAPI.selectPresentationMaterials()
+    setMaterialPaths(paths)
+    if (selectedPath) {
+      onSelect(selectedPath, paths)
     }
   }
 
@@ -99,6 +111,10 @@ export function FileSelector({ onSelect }: FileSelectorProps): React.JSX.Element
         Select PPTX
       </button>
 
+      <button className="secondary" onClick={handleSelectMaterials} type="button">
+        Add Q&amp;A Materials
+      </button>
+
       <div className="drop-zone" onDragOver={handleDragOver} onDrop={handleDrop}>
         {dropHint}
       </div>
@@ -109,6 +125,16 @@ export function FileSelector({ onSelect }: FileSelectorProps): React.JSX.Element
           <div>{metadata.sizeLabel}</div>
           <div>{metadata.lastModified}</div>
           <div className="muted">{metadata.path}</div>
+        </div>
+      )}
+
+      {materialPaths.length > 0 && (
+        <div className="file-metadata">
+          <div>{materialPaths.length} Q&amp;A material file{materialPaths.length === 1 ? '' : 's'}</div>
+          {materialPaths.slice(0, 4).map((path) => (
+            <div key={path} className="muted">{path}</div>
+          ))}
+          {materialPaths.length > 4 && <div className="muted">+{materialPaths.length - 4} more</div>}
         </div>
       )}
 

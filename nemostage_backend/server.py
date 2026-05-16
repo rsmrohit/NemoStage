@@ -38,6 +38,10 @@ BREV_OLLAMA_URL = "http://127.0.0.1:11436"
 BREV_OLLAMA_MODEL = "gemma4:26b"
 MAX_RECENT_QA = 20
 DECK_INDEX_PATH = os.path.join(CHROMA_ROOT, "decks.json")
+MATERIAL_MAX_FILE_BYTES = 25 * 1024 * 1024
+MATERIAL_TEXT_MAX_CHARS = 80_000
+MATERIAL_CHUNK_CHARS = 1600
+MATERIAL_CHUNK_OVERLAP = 160
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 VECTOR_TOP_K = 5
 VECTOR_RELEVANCE_DISTANCE_THRESHOLD = 0.45
@@ -90,6 +94,9 @@ class PresentationSession(BaseModel):
     vectorization_status: str = "unavailable"
     chunks_indexed: int = 0
     vectorization_error: str | None = None
+    material_chunks_indexed: int = 0
+    material_files_indexed: int = 0
+    material_sandbox_dir: str = ""
 
 
 class DeckIndexInfo(BaseModel):
@@ -97,9 +104,13 @@ class DeckIndexInfo(BaseModel):
     collection_name: str
     filename: str
     sandbox_path: str = ""
+    sandbox_dir: str = ""
     vectorization_status: str
     chunks_indexed: int = 0
+    material_chunks_indexed: int = 0
+    material_files_indexed: int = 0
     vectorization_error: str | None = None
+    material_index_error: str | None = None
     updated_at: float
     style_spec: dict | None = None
 
@@ -161,8 +172,27 @@ def validate_pptx_filename(filename: str) -> str:
     return safe_name
 
 
+def safe_path_component(value: str, fallback: str = "presentation") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-_")
+    return cleaned[:80] or fallback
+
+
+def presentation_subdir_for(filename: str, deck_id: str) -> str:
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    return f"{safe_path_component(stem)}-{deck_id[:12]}"
+
+
+def validate_material_filename(filename: str) -> str:
+    safe_name = os.path.basename(filename)
+    if not safe_name or "/" in safe_name or "\\" in safe_name or ".." in safe_name:
+        raise HTTPException(status_code=400, detail=f"Invalid material filename: {filename}")
+    return safe_path_component(safe_name, "material")
+
+
 def save_pptx_to_sandbox(filename: str, content: bytes) -> dict:
     safe_name = validate_pptx_filename(filename)
+    deck_id = hashlib.sha256(content).hexdigest()
+    sandbox_dir = f"{SANDBOX_DEST}/{presentation_subdir_for(safe_name, deck_id)}"
     container = get_nemostage_container()
 
     with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
@@ -171,10 +201,10 @@ def save_pptx_to_sandbox(filename: str, content: bytes) -> dict:
 
     try:
         subprocess.run(
-            ["docker", "exec", container, "mkdir", "-p", SANDBOX_DEST],
+            ["docker", "exec", container, "mkdir", "-p", sandbox_dir],
             check=True
         )
-        dest = f"{SANDBOX_DEST}/{safe_name}"
+        dest = f"{sandbox_dir}/{safe_name}"
         subprocess.run(
             ["docker", "cp", tmp_path, f"{container}:{dest}"],
             check=True
@@ -189,7 +219,35 @@ def save_pptx_to_sandbox(filename: str, content: bytes) -> dict:
     return {
         "filename": safe_name,
         "sandbox_path": dest,
+        "sandbox_dir": sandbox_dir,
         "container": container,
+        "size_bytes": len(content),
+    }
+
+
+def save_material_to_sandbox(deck_info: DeckIndexInfo, filename: str, content: bytes) -> dict:
+    if len(content) > MATERIAL_MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail=f"{filename} is larger than 25MB")
+    safe_name = validate_material_filename(filename)
+    container = get_nemostage_container()
+    sandbox_dir = deck_info.sandbox_dir or os.path.dirname(deck_info.sandbox_path)
+    material_dir = f"{sandbox_dir}/materials"
+
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        subprocess.run(["docker", "exec", container, "mkdir", "-p", material_dir], check=True)
+        dest = f"{material_dir}/{safe_name}"
+        subprocess.run(["docker", "cp", tmp_path, f"{container}:{dest}"], check=True)
+        subprocess.run(["docker", "exec", container, "chown", "sandbox:sandbox", dest], check=True)
+    finally:
+        os.unlink(tmp_path)
+
+    return {
+        "filename": safe_name,
+        "sandbox_path": dest,
         "size_bytes": len(content),
     }
 
@@ -239,6 +297,10 @@ def get_chroma_client():
 
 def collection_name_for_deck(deck_id: str) -> str:
     return f"presentation_{deck_id[:40]}"
+
+
+def material_collection_name_for_deck(deck_id: str) -> str:
+    return f"presentation_materials_{deck_id[:40]}"
 
 
 def extract_xml_text(xml: bytes) -> str:
@@ -299,6 +361,55 @@ def extract_pptx_slide_documents(content: bytes) -> list[dict]:
     return documents
 
 
+def extract_docx_text(content: bytes) -> str:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            parts = []
+            for name in sorted(z.namelist()):
+                if name == "word/document.xml" or name.startswith("word/header") or name.startswith("word/footer"):
+                    text = extract_xml_text(z.read(name))
+                    if text:
+                        parts.append(text)
+            return "\n\n".join(parts)
+    except Exception:
+        return ""
+
+
+def extract_material_text(filename: str, content: bytes) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    if ext == ".docx":
+        text = extract_docx_text(content)
+    elif ext == ".pptx":
+        docs = extract_pptx_slide_documents(content)
+        text = "\n\n".join(doc["text"] for doc in docs)
+    elif ext in {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".html", ".htm", ".xml", ".yaml", ".yml"}:
+        text = content.decode("utf-8", errors="replace")
+        if ext in {".html", ".htm", ".xml"}:
+            text = re.sub(r"<[^>]+>", " ", text)
+    else:
+        return ""
+
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:MATERIAL_TEXT_MAX_CHARS]
+
+
+def chunk_material_text(text: str) -> list[str]:
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunk = text[start:start + MATERIAL_CHUNK_CHARS].strip()
+        if chunk:
+            chunks.append(chunk)
+        if start + MATERIAL_CHUNK_CHARS >= len(text):
+            break
+        start += MATERIAL_CHUNK_CHARS - MATERIAL_CHUNK_OVERLAP
+    return chunks
+
+
 def extract_deck_style(content: bytes) -> dict:
     style: dict = {"bg_color": "#1a1a2e", "accent_color": "#4f8ef7", "font_family": "Calibri"}
     try:
@@ -341,7 +452,12 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return embeddings.tolist()
 
 
-def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) -> DeckIndexInfo:
+def rebuild_deck_vector_index(
+    filename: str,
+    sandbox_path: str,
+    content: bytes,
+    sandbox_dir: str = "",
+) -> DeckIndexInfo:
     deck_id = hashlib.sha256(content).hexdigest()
     collection_name = collection_name_for_deck(deck_id)
     now = time.time()
@@ -355,6 +471,10 @@ def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) 
         client = get_chroma_client()
         try:
             client.delete_collection(collection_name)
+        except Exception:
+            pass
+        try:
+            client.delete_collection(material_collection_name_for_deck(deck_id))
         except Exception:
             pass
 
@@ -384,6 +504,7 @@ def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) 
             collection_name=collection_name,
             filename=filename,
             sandbox_path=sandbox_path,
+            sandbox_dir=sandbox_dir or os.path.dirname(sandbox_path),
             vectorization_status="ready",
             chunks_indexed=len(slide_documents),
             updated_at=now,
@@ -395,6 +516,7 @@ def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) 
             collection_name=collection_name,
             filename=filename,
             sandbox_path=sandbox_path,
+            sandbox_dir=sandbox_dir or os.path.dirname(sandbox_path),
             vectorization_status="failed",
             chunks_indexed=0,
             vectorization_error=str(exc),
@@ -405,6 +527,77 @@ def rebuild_deck_vector_index(filename: str, sandbox_path: str, content: bytes) 
     deck_indexes_by_filename[filename] = info
     persist_deck_index_manifest()
     return info
+
+
+def index_presentation_materials(deck_info: DeckIndexInfo, saved_files: list[dict[str, Any]]) -> dict:
+    collection_name = material_collection_name_for_deck(deck_info.deck_id)
+    indexed_files = 0
+    indexed_chunks = 0
+    errors = []
+
+    try:
+        client = get_chroma_client()
+        try:
+            collection = client.get_collection(collection_name)
+        except Exception:
+            collection = client.create_collection(
+                name=collection_name,
+                metadata={
+                    "deck_id": deck_info.deck_id,
+                    "filename": deck_info.filename,
+                    "hnsw:space": "cosine",
+                },
+            )
+
+        for saved in saved_files:
+            content = saved.get("content", b"")
+            source_filename = saved["filename"]
+            text = extract_material_text(source_filename, content)
+            chunks = chunk_material_text(text)
+            if not chunks:
+                errors.append(f"{source_filename}: no supported text extracted")
+                continue
+
+            embeddings = embed_texts(chunks)
+            file_hash = hashlib.sha256(content).hexdigest()[:16]
+            upload_stamp = int(time.time() * 1000)
+            ids = [
+                f"{deck_info.deck_id[:12]}-mat-{file_hash}-{upload_stamp}-{index}"
+                for index, _chunk in enumerate(chunks)
+            ]
+            metadatas = [
+                {
+                    "deck_id": deck_info.deck_id,
+                    "presentation_filename": deck_info.filename,
+                    "source_type": "material",
+                    "source_filename": source_filename,
+                    "sandbox_path": saved["sandbox_path"],
+                    "chunk_index": index,
+                }
+                for index, _chunk in enumerate(chunks)
+            ]
+            collection.add(ids=ids, documents=chunks, embeddings=embeddings, metadatas=metadatas)
+            indexed_files += 1
+            indexed_chunks += len(chunks)
+
+        deck_info.material_files_indexed += indexed_files
+        deck_info.material_chunks_indexed += indexed_chunks
+        deck_info.material_index_error = "; ".join(errors) if errors else None
+        deck_info.updated_at = time.time()
+        deck_indexes_by_filename[deck_info.filename] = deck_info
+        persist_deck_index_manifest()
+    except Exception as exc:
+        deck_info.material_index_error = str(exc)
+        deck_indexes_by_filename[deck_info.filename] = deck_info
+        persist_deck_index_manifest()
+        raise
+
+    return {
+        "collection_name": collection_name,
+        "material_files_indexed": indexed_files,
+        "material_chunks_indexed": indexed_chunks,
+        "errors": errors,
+    }
 
 
 def find_deck_index(filename: str) -> DeckIndexInfo | None:
@@ -463,6 +656,42 @@ def query_deck_vectors(session: PresentationSession, transcript: str) -> dict:
         return {"status": "failed", "error": str(exc), "matches": []}
 
 
+def query_material_vectors(deck_info: DeckIndexInfo | None, question: str, top_k: int = 4) -> dict:
+    if not deck_info or deck_info.material_chunks_indexed <= 0:
+        return {"status": "unavailable", "matches": []}
+
+    try:
+        client = get_chroma_client()
+        collection = client.get_collection(material_collection_name_for_deck(deck_info.deck_id))
+        query_embedding = embed_texts([question])[0]
+        result = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            where={"deck_id": deck_info.deck_id},
+            include=["documents", "metadatas", "distances"],
+        )
+        documents = result.get("documents", [[]])[0]
+        metadatas = result.get("metadatas", [[]])[0]
+        distances = result.get("distances", [[]])[0]
+        matches = []
+        for document, metadata, distance in zip(documents, metadatas, distances):
+            matches.append(
+                {
+                    "document": document,
+                    "metadata": metadata or {},
+                    "distance": float(distance),
+                }
+            )
+        return {
+            "status": "ready",
+            "collection_name": material_collection_name_for_deck(deck_info.deck_id),
+            "deck_id": deck_info.deck_id,
+            "matches": matches,
+        }
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc), "matches": []}
+
+
 def format_vector_matches_for_agent(vector_search: dict, current_slide: int) -> str:
     matches = vector_search.get("matches", [])
     if not matches:
@@ -477,6 +706,24 @@ def format_vector_matches_for_agent(vector_search: dict, current_slide: int) -> 
             f"[{marker} {strength}_vector_match distance={match.get('distance'):.4f}] "
             f"slide_index={metadata.get('slide_index')}, slide_number={metadata.get('slide_number')}\n"
             f"title: {metadata.get('title') or '[empty]'}\n"
+            f"text: {text or '[empty]'}"
+        )
+    return "\n\n".join(blocks)
+
+
+def format_material_matches_for_agent(material_search: dict) -> str:
+    matches = material_search.get("matches", [])
+    if not matches:
+        return "[no retrieved supporting-material matches]"
+    blocks = []
+    for match in matches:
+        metadata = match.get("metadata", {})
+        text = compact_agent_text(match.get("document", ""), 1800)
+        blocks.append(
+            f"[supporting_material distance={match.get('distance'):.4f}] "
+            f"file={metadata.get('source_filename') or '[unknown]'} "
+            f"chunk={metadata.get('chunk_index')}\n"
+            f"path: {metadata.get('sandbox_path') or '[unknown]'}\n"
             f"text: {text or '[empty]'}"
         )
     return "\n\n".join(blocks)
@@ -568,6 +815,16 @@ async def ask_brev_ollama(prompt: str, timeout: int = 120) -> str:
         raise HTTPException(status_code=502, detail=f"Brev Ollama unreachable: {exc}")
     except (KeyError, IndexError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail=f"Brev Ollama bad response: {exc}")
+
+
+async def ask_agent_async(
+    prompt: str,
+    agent: str = "main",
+    timeout: int = 300,
+    session_id: str | None = None,
+) -> str:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, ask_agent, prompt, agent, timeout, session_id)
 
 
 async def generate_slide_background(
@@ -779,6 +1036,13 @@ async def start_presentation(payload: PresentationStartRequest):
         collection_name=deck_index.collection_name if deck_index else None,
         vectorization_status=deck_index.vectorization_status if deck_index else "unavailable",
         chunks_indexed=deck_index.chunks_indexed if deck_index else 0,
+        material_chunks_indexed=deck_index.material_chunks_indexed if deck_index else 0,
+        material_files_indexed=deck_index.material_files_indexed if deck_index else 0,
+        material_sandbox_dir=(
+            f"{deck_index.sandbox_dir}/materials"
+            if deck_index and deck_index.sandbox_dir
+            else ""
+        ),
         vectorization_error=(
             deck_index.vectorization_error
             if deck_index
@@ -795,6 +1059,9 @@ async def start_presentation(payload: PresentationStartRequest):
         "vectorization_status": session.vectorization_status,
         "chunks_indexed": session.chunks_indexed,
         "vectorization_error": session.vectorization_error,
+        "material_files_indexed": session.material_files_indexed,
+        "material_chunks_indexed": session.material_chunks_indexed,
+        "material_sandbox_dir": session.material_sandbox_dir,
     }
 
 
@@ -1033,7 +1300,12 @@ async def get_presentation(presentation_id: str):
 async def upload_pptx_to_sandbox(file: UploadFile = File(...)):
     content = await file.read()
     upload = save_pptx_to_sandbox(file.filename, content)
-    deck_index = rebuild_deck_vector_index(upload["filename"], upload["sandbox_path"], content)
+    deck_index = rebuild_deck_vector_index(
+        upload["filename"],
+        upload["sandbox_path"],
+        content,
+        upload["sandbox_dir"],
+    )
     return JSONResponse({
         "status": "ok",
         **upload,
@@ -1043,6 +1315,43 @@ async def upload_pptx_to_sandbox(file: UploadFile = File(...)):
         "vectorization_status": deck_index.vectorization_status,
         "chunks_indexed": deck_index.chunks_indexed,
         "vectorization_error": deck_index.vectorization_error,
+        "material_files_indexed": deck_index.material_files_indexed,
+        "material_chunks_indexed": deck_index.material_chunks_indexed,
+        "material_sandbox_dir": f"{deck_index.sandbox_dir}/materials",
+    })
+
+
+@app.post("/sandbox/presentation-materials")
+async def upload_presentation_materials(
+    presentation_filename: str = Form(...),
+    files: list[UploadFile] = File(...),
+):
+    safe_presentation_filename = validate_pptx_filename(presentation_filename)
+    deck_index = find_deck_index(safe_presentation_filename)
+    if not deck_index:
+        raise HTTPException(status_code=404, detail=f"presentation not indexed: {safe_presentation_filename}")
+    if not files:
+        raise HTTPException(status_code=400, detail="no material files provided")
+
+    saved_files = []
+    for file in files:
+        content = await file.read()
+        saved = save_material_to_sandbox(deck_index, file.filename, content)
+        saved["content"] = content
+        saved_files.append(saved)
+
+    index_result = index_presentation_materials(deck_index, saved_files)
+    response_files = [
+        {key: value for key, value in saved.items() if key != "content"}
+        for saved in saved_files
+    ]
+    return JSONResponse({
+        "status": "ok",
+        "presentation_filename": safe_presentation_filename,
+        "sandbox_dir": deck_index.sandbox_dir,
+        "material_sandbox_dir": f"{deck_index.sandbox_dir}/materials",
+        "files": response_files,
+        **index_result,
     })
 
 
@@ -1050,7 +1359,12 @@ async def upload_pptx_to_sandbox(file: UploadFile = File(...)):
 async def upload_pptx(file: UploadFile = File(...)):
     content = await file.read()
     upload = save_pptx_to_sandbox(file.filename, content)
-    deck_index = rebuild_deck_vector_index(upload["filename"], upload["sandbox_path"], content)
+    deck_index = rebuild_deck_vector_index(
+        upload["filename"],
+        upload["sandbox_path"],
+        content,
+        upload["sandbox_dir"],
+    )
     dest = upload["sandbox_path"]
 
     prompt = (
@@ -1081,6 +1395,9 @@ async def upload_pptx(file: UploadFile = File(...)):
         "vectorization_status": deck_index.vectorization_status,
         "chunks_indexed": deck_index.chunks_indexed,
         "vectorization_error": deck_index.vectorization_error,
+        "material_files_indexed": deck_index.material_files_indexed,
+        "material_chunks_indexed": deck_index.material_chunks_indexed,
+        "material_sandbox_dir": f"{deck_index.sandbox_dir}/materials",
         "summary": summary,
     })
 
@@ -1096,15 +1413,19 @@ def list_presentations():
                 f"root = {SANDBOX_DEST!r}\n"
                 "files = []\n"
                 "if os.path.isdir(root):\n"
-                "    for entry in os.scandir(root):\n"
-                "        if entry.is_file() and entry.name.endswith('.pptx'):\n"
-                "            stat = entry.stat()\n"
-                "            files.append({\n"
-                "                'filename': entry.name,\n"
-                "                'size_bytes': stat.st_size,\n"
-                "                'uploaded_at': datetime.datetime.utcfromtimestamp(stat.st_mtime).strftime('%Y-%m-%dT%H:%M:%SZ'),\n"
-                "                'sandbox_path': os.path.join(root, entry.name),\n"
-                "            })\n"
+                "    for current_root, dirs, names in os.walk(root):\n"
+                "        if os.path.basename(current_root) == 'materials':\n"
+                "            continue\n"
+                "        for name in names:\n"
+                "            if name.endswith('.pptx'):\n"
+                "                path = os.path.join(current_root, name)\n"
+                "                stat = os.stat(path)\n"
+                "                files.append({\n"
+                "                    'filename': name,\n"
+                "                    'size_bytes': stat.st_size,\n"
+                "                    'uploaded_at': datetime.datetime.utcfromtimestamp(stat.st_mtime).strftime('%Y-%m-%dT%H:%M:%SZ'),\n"
+                "                    'sandbox_path': path,\n"
+                "                })\n"
                 "files.sort(key=lambda item: item['uploaded_at'], reverse=True)\n"
                 "print(json.dumps(files))\n"
             )
@@ -1130,19 +1451,43 @@ def delete_presentation(filename: str):
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     container = get_nemostage_container()
-    target = f"{SANDBOX_DEST}/{filename}"
+    deck_index = find_deck_index(filename)
+    target = deck_index.sandbox_path if deck_index and deck_index.sandbox_path else f"{SANDBOX_DEST}/{filename}"
 
     check = subprocess.run(
         ["docker", "exec", container, "test", "-f", target],
         capture_output=True
     )
     if check.returncode != 0:
-        raise HTTPException(status_code=404, detail=f"{filename} not found in sandbox")
+        finder = subprocess.run(
+            [
+                "docker", "exec", container, "python3", "-c",
+                (
+                    "import json, os, sys\n"
+                    f"root = {SANDBOX_DEST!r}\n"
+                    f"name = {filename!r}\n"
+                    "for current_root, dirs, names in os.walk(root):\n"
+                    "    if name in names:\n"
+                    "        print(os.path.join(current_root, name))\n"
+                    "        sys.exit(0)\n"
+                    "sys.exit(1)\n"
+                ),
+            ],
+            capture_output=True, text=True,
+        )
+        if finder.returncode != 0 or not finder.stdout.strip():
+            raise HTTPException(status_code=404, detail=f"{filename} not found in sandbox")
+        target = finder.stdout.strip().splitlines()[0]
 
+    delete_target = target
+    if deck_index and os.path.basename(os.path.dirname(target)).endswith(deck_index.deck_id[:12]):
+        delete_target = os.path.dirname(target)
     subprocess.run(
-        ["docker", "exec", container, "rm", target],
+        ["docker", "exec", container, "rm", "-rf", delete_target],
         check=True
     )
+    deck_indexes_by_filename.pop(filename, None)
+    persist_deck_index_manifest()
     return JSONResponse({"status": "ok", "deleted": filename, "sandbox_path": target})
 
 
@@ -1179,7 +1524,7 @@ async def audience_question(text: str = Form(...)):
     msg = {"type": "question", "text": text, "ts": ts}
     await hub.broadcast(msg)
     asyncio.create_task(_answer_audience_question(text, ts))
-    return {"status": "ok"}
+    return {"status": "ok", "ts": ts}
 
 
 async def _answer_audience_question(question: str, ts: float) -> None:
@@ -1190,24 +1535,35 @@ async def _answer_audience_question(question: str, ts: float) -> None:
         reverse=True,
     )
     vector_context = "[no slide context available]"
+    material_context = "[no uploaded supporting-material matches]"
+    material_dir = "[no presentation material directory available]"
     if active:
-        vector_search = query_deck_vectors(active[0], question)
+        session = active[0]
+        deck_info = find_deck_index(session.file_name)
+        vector_search = query_deck_vectors(session, question)
         matches = (vector_search.get("matches") or [])[:3]
         if matches:
             vector_context = "\n\n".join(
                 f"Slide {m['metadata'].get('slide_number')}: {m['metadata'].get('title')}\n{m['document'][:500]}"
                 for m in matches
             )
+        if deck_info:
+            material_dir = f"{deck_info.sandbox_dir}/materials"
+            material_context = format_material_matches_for_agent(query_material_vectors(deck_info, question))
 
     prompt = (
         "You are the NemoStage presentation assistant answering a live audience question. "
-        "Answer concisely in 2-3 sentences using only the slide context below. "
-        "If the context doesn't cover the question, say so briefly.\n\n"
+        "Answer concisely in 2-3 sentences using the slide context and the uploaded "
+        "supporting materials for this presentation. The supporting materials live in "
+        f"this NemoClaw sandbox directory: {material_dir}. Use files in that directory "
+        "as valid presentation materials when they answer the question. If neither the "
+        "slides nor supporting materials cover the question, say so briefly.\n\n"
         f"Question: {question}\n\n"
-        f"Slide context:\n{vector_context}"
+        f"Slide context:\n{vector_context}\n\n"
+        f"Retrieved supporting-material context:\n{material_context}\n"
     )
     try:
-        answer = await ask_brev_ollama(prompt, timeout=60)
+        answer = await ask_agent_async(prompt, agent="audience", timeout=120)
         entry = {"question": question, "answer": answer, "ts": ts}
         recent_qa.append(entry)
         if len(recent_qa) > MAX_RECENT_QA:
@@ -1271,6 +1627,12 @@ AUDIENCE_HTML = """<!DOCTYPE html>
   .signal.lost { background: #450a0a; color: #f87171; }
   .section-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
                    color: #71717a; margin: 32px 0 10px; font-weight: 600; }
+  .answers { display: grid; gap: 12px; margin-top: 10px; }
+  .answer-card { padding: 14px; border: 1px solid #2a2a2e; border-radius: 12px; background: #18181b; }
+  .answer-card.pending { border-color: #3f3f46; color: #a1a1aa; }
+  .answer-card strong { display: block; margin-bottom: 8px; color: #f4f4f5; font-size: 14px; line-height: 1.35; }
+  .answer-card p { margin: 0; color: #d4d4d8; font-size: 14px; line-height: 1.45; white-space: pre-wrap; }
+  .empty-answers { color: #71717a; font-size: 14px; line-height: 1.45; }
   .toast { position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%) translateY(80px);
            background: #18181b; border: 1px solid #2a2a2e; padding: 12px 22px; border-radius: 999px;
            font-size: 14px; opacity: 0; transition: opacity .25s ease, transform .25s ease;
@@ -1280,7 +1642,7 @@ AUDIENCE_HTML = """<!DOCTYPE html>
 </head>
 <body>
   <h1>Ask the speaker</h1>
-  <div class="sub">Your question or reaction shows up live on the slideshow.</div>
+  <div class="sub">Ask a question or send a quick reaction. Answers appear here when NemoStage responds.</div>
 
   <form id="qform">
     <textarea id="qtext" placeholder="Type your question..." maxlength="1000"></textarea>
@@ -1296,16 +1658,73 @@ AUDIENCE_HTML = """<!DOCTYPE html>
     <button class="signal lost" data-signal="lost">Lost</button>
   </div>
 
+  <div class="section-label">Answers</div>
+  <div id="emptyAnswers" class="empty-answers">No answered questions yet.</div>
+  <div id="answers" class="answers"></div>
+
   <div id="toast" class="toast"></div>
 
 <script>
 const toast = document.getElementById('toast');
+const answers = document.getElementById('answers');
+const emptyAnswers = document.getElementById('emptyAnswers');
 let toastTimer = null;
+let lastQaTs = 0;
+const pendingQuestions = new Map();
+const renderedAnswers = new Set();
+
 function showToast(msg) {
   toast.textContent = msg;
   toast.classList.add('show');
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), 1700);
+}
+
+function setAnswersEmptyState() {
+  emptyAnswers.style.display = answers.children.length ? 'none' : 'block';
+}
+
+function renderAnswer(entry, pending = false) {
+  const key = String(entry.ts);
+  if (!pending && renderedAnswers.has(key)) return;
+
+  const card = document.createElement('article');
+  card.className = `answer-card${pending ? ' pending' : ''}`;
+  card.dataset.ts = key;
+
+  const question = document.createElement('strong');
+  question.textContent = entry.question || 'Question';
+  card.appendChild(question);
+
+  const answer = document.createElement('p');
+  answer.textContent = pending ? 'Waiting for NemoStage to answer...' : entry.answer;
+  card.appendChild(answer);
+
+  const existing = Array.from(answers.children).find((child) => child.dataset.ts === key);
+  if (existing) {
+    existing.replaceWith(card);
+  } else {
+    answers.prepend(card);
+  }
+
+  if (!pending) renderedAnswers.add(key);
+  while (answers.children.length > 10) answers.lastElementChild.remove();
+  setAnswersEmptyState();
+}
+
+async function pollAnswers() {
+  try {
+    const r = await fetch(`/audience/qa/recent?after=${encodeURIComponent(lastQaTs)}`);
+    if (!r.ok) throw new Error();
+    const data = await r.json();
+    for (const entry of data.qa || []) {
+      renderAnswer(entry, false);
+      pendingQuestions.delete(String(entry.ts));
+      lastQaTs = Math.max(lastQaTs, entry.ts);
+    }
+  } catch {
+    // Keep the page quiet; the next poll can recover.
+  }
 }
 
 document.getElementById('qform').addEventListener('submit', async (e) => {
@@ -1320,7 +1739,11 @@ document.getElementById('qform').addEventListener('submit', async (e) => {
   try {
     const r = await fetch('/audience/question', { method: 'POST', body: fd });
     if (!r.ok) throw new Error();
+    const data = await r.json();
     ta.value = '';
+    const pending = { question: text, answer: '', ts: data.ts || Date.now() / 1000 };
+    pendingQuestions.set(String(pending.ts), pending);
+    renderAnswer(pending, true);
     showToast('Question sent');
   } catch {
     showToast('Failed to send');
@@ -1345,6 +1768,10 @@ document.querySelectorAll('button.signal').forEach(btn => {
     }
   });
 });
+
+setAnswersEmptyState();
+pollAnswers();
+setInterval(pollAnswers, 3000);
 </script>
 </body>
 </html>

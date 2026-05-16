@@ -89,6 +89,24 @@ export interface SandboxUploadResult {
   vectorization_status?: 'ready' | 'failed' | 'unavailable'
   chunks_indexed?: number
   vectorization_error?: string | null
+  material_files_indexed?: number
+  material_chunks_indexed?: number
+  material_sandbox_dir?: string
+}
+
+export interface MaterialUploadResult {
+  status: string
+  presentation_filename: string
+  sandbox_dir: string
+  material_sandbox_dir: string
+  material_files_indexed: number
+  material_chunks_indexed: number
+  errors?: string[]
+  files: Array<{
+    filename: string
+    sandbox_path: string
+    size_bytes: number
+  }>
 }
 
 export interface EmbeddedFontEntry {
@@ -101,8 +119,13 @@ export interface EmbeddedFontEntry {
 
 export interface ElectronAPI {
   selectPPTX: () => Promise<string | null>
+  selectPresentationMaterials: () => Promise<string[]>
   getFileStats: (filePath: string) => Promise<{ size: number; mtimeMs: number } | null>
   uploadPPTXToSandbox: (filePath: string) => Promise<SandboxUploadResult>
+  uploadPresentationMaterials: (
+    presentationFilename: string,
+    filePaths: string[]
+  ) => Promise<MaterialUploadResult>
   extractPPTX: (filePath: string) => Promise<ExtractionResult>
   getSlideImage: (sessionId: string, slideIndex: number) => Promise<string | null>
   getSlideData: (sessionId: string, slideIndex: number) => Promise<SlideData>
