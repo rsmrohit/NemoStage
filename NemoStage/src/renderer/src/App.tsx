@@ -22,6 +22,8 @@ import type { VectorizationFields } from './services/nemostageApi'
 import { usePresentationStore } from './store/presentationStore'
 import type { ExtractionPhase, GeneratedSlide, QAEntry, SessionMetadata, SlideData } from './types/presentation'
 import { useFonts } from './hooks/useFonts'
+import { LobsterBackground } from './components/LobsterBackground'
+import { DotGrid } from './components/DotGrid'
 
 type AppMode = 'select' | 'gallery' | 'live'
 type LiveAgentStatus =
@@ -260,6 +262,7 @@ function AppContent(): React.JSX.Element {
         setSlideData(currentSlide, data)
         void loadFonts(fonts, 'truetype')
         setStatusMessage('Structured slide data is ready.')
+        setProgress(1)
         setExtractionPhase('ready')
       }
     )
@@ -271,6 +274,8 @@ function AppContent(): React.JSX.Element {
         }
         setDoclingStatus('failed')
         setStatusMessage(`Docling unavailable: ${message}`)
+        setProgress(1)
+        setExtractionPhase('ready')
       }
     )
 
@@ -452,7 +457,7 @@ function AppContent(): React.JSX.Element {
       }
       
 
-      console.log(`[transcript] Flushing ${currentBuffer.length} segment(s) to API — ${combinedTranscript.length} chars`)
+      console.log(`[transcript] Sending ${currentBuffer.length} segment(s) — "${combinedTranscript}"`)
 
       // Send the combined chunk
       setLiveAgentStatus('analyzing')
@@ -463,6 +468,12 @@ function AppContent(): React.JSX.Element {
           if ((result as unknown as Record<string, unknown>).noop === true) {
             setLiveAgentStatus('ready')
             setLiveAgentMessage('Waiting for transcript speech...')
+            return
+          }
+
+          if (result.coverage_status === 'not_relevant') {
+            const dist = result.vector_search?.best_distance
+            console.log(`[transcript] chunk not relevant to presentation (best_distance=${dist?.toFixed(3) ?? 'N/A'}) — skipping update`)
             return
           }
 
@@ -704,8 +715,13 @@ function AppContent(): React.JSX.Element {
               ? 'Preview ready. Parsing structure in background.'
               : 'Ready'
       )
-      setProgress(1)
-      setExtractionPhase('ready')
+      if (result.doclingStatus === 'pending') {
+        setProgress(0.9)
+        setExtractionPhase('parsing_structure')
+      } else {
+        setProgress(1)
+        setExtractionPhase('ready')
+      }
       await loadRecentSessions()
     } catch (error) {
       setExtractionPhase('error')
@@ -968,6 +984,8 @@ function AppContent(): React.JSX.Element {
       )}
 
       <section className="workspace">
+        <DotGrid />
+        <LobsterBackground />
         <header className="status-bar">
           <div>
             <strong>Status:</strong> {extractionPhase}
@@ -1010,11 +1028,16 @@ function AppContent(): React.JSX.Element {
               onSlideSelect={goToSlide}
               onLaunch={() => void handleLaunchPresentation()}
             />
-            {currentSlideImage && (
+            {(currentSlideImage || slideData[currentSlide]) && (
               <div className="selected-preview">
                 <h3>Selected Slide</h3>
                 <div className="selected-preview-media">
-                  <img src={currentSlideImage} alt={`Selected slide ${currentSlide + 1}`} />
+                  <SlideCanvas
+                    currentSlide={currentSlide}
+                    slideData={slideData[currentSlide] ?? null}
+                    slideImage={currentSlideImage}
+                    fontsVersion={fontsVersion}
+                  />
                 </div>
               </div>
             )}

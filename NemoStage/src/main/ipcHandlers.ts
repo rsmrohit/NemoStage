@@ -524,7 +524,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
     startStructureParse(runtime, filePath, getMainWindow)
 
-    emitProgress({ phase: 'extracting_images', progress: 1, message: 'Preview ready' })
+    emitProgress({ phase: 'extracting_images', progress: 0.8, message: 'Preview ready' })
     return result
   })
 
