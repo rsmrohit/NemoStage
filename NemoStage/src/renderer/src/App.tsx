@@ -117,6 +117,7 @@ function AppContent(): React.JSX.Element {
   const BATCH_INTERVAL_MS = 20000 // 20 seconds
   const presentationIdRef = useRef<string | null>(null)
   const processedTranscriptEventRef = useRef<string | null>(null)
+  const recordingStartTimeRef = useRef<number>(0)
   const [injectedSlides, setInjectedSlides] = useState<GeneratedSlide[]>([])
   const slideGenPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [activeQA, setActiveQA] = useState<QAEntry | null>(null)
@@ -614,6 +615,13 @@ function AppContent(): React.JSX.Element {
         return
       }
 
+      if (transcriptEvent.timestamp) {
+        const eventTime = new Date(transcriptEvent.timestamp).getTime()
+        if (!isNaN(eventTime) && eventTime < recordingStartTimeRef.current) {
+          return
+        }
+      }
+
       const eventKey = getTranscriptEventKey(transcriptEvent)
       if (eventKey === processedTranscriptEventRef.current) {
         return
@@ -837,6 +845,7 @@ function AppContent(): React.JSX.Element {
         setTranscriptBuffer([]) // Clear buffer
       } else {
         processedTranscriptEventRef.current = null
+        recordingStartTimeRef.current = Date.now()
         const status = await window.electronAPI.startTranscriptListener()
         setRecording(status.listening)
         setTranscriptDirectory(status.directory)
