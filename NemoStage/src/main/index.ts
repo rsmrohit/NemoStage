@@ -5,6 +5,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset' 
 import { registerIpcHandlers } from './ipcHandlers' 
 import { cleanupOldSessions } from './services/workspaceManager' 
+import { mediaUrlToPath, mimeTypeForPath } from './services/mediaProtocol'
 
 app.commandLine.appendSwitch('disable-web-security') 
 app.commandLine.appendSwitch('user-data-dir', path.join(app.getPath('userData'), 'dev-profile')) 
@@ -61,16 +62,7 @@ app.whenReady().then(async () => {
 
   protocol.handle('nemostage-media', async (request) => {
     try {
-      const url = new URL(request.url)
-      let filePath = decodeURIComponent(url.pathname)
-
-      if (process.platform === 'win32' && /^\/[A-Za-z]:\//.test(filePath)) {
-        filePath = filePath.slice(1)
-      } else if (url.hostname) {
-        filePath = `/${url.hostname}${filePath}`
-      }
-
-      filePath = path.normalize(filePath)
+      const filePath = mediaUrlToPath(request.url)
 
       if (!fs.existsSync(filePath)) {
         console.error(`[nemostage-media] File missing at path: ${filePath}`)
@@ -79,26 +71,12 @@ app.whenReady().then(async () => {
 
       const fileBuffer = fs.readFileSync(filePath)
 
-      const ext = filePath.split('.').pop()?.toLowerCase()
-      const mimeTypes: Record<string, string> = {
-        woff2: 'font/woff2',
-        woff: 'font/woff',
-        ttf: 'font/ttf',
-        otf: 'font/otf',
-        png: 'image/png',
-        jpg: 'image/jpeg',
-        jpeg: 'image/jpeg',
-        svg: 'image/svg+xml',
-        gif: 'image/gif'
-      }
-      const mime = ext ? mimeTypes[ext] : 'application/octet-stream'
-
       return new Response(fileBuffer, {
         status: 200,
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, OPTIONS',
-          'Content-Type': mime
+          'Content-Type': mimeTypeForPath(filePath)
         }
       })
     } catch (error) {

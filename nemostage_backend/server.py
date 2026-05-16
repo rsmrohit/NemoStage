@@ -45,6 +45,10 @@ MATERIAL_CHUNK_OVERLAP = 160
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 VECTOR_TOP_K = 5
 VECTOR_RELEVANCE_DISTANCE_THRESHOLD = 0.45
+SLIDE_TEMPLATE_LIMIT = 3
+SLIDE_TEMPLATE_MAX_TEXT_BOXES = 8
+DEFAULT_SLIDE_WIDTH_EMU = 9144000
+DEFAULT_SLIDE_HEIGHT_EMU = 6858000
 
 _embedding_model = None
 _chroma_client = None
@@ -446,6 +450,298 @@ def extract_deck_style(content: bytes) -> dict:
     return style
 
 
+def normalize_hex_color(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip().lstrip("#")
+    if re.fullmatch(r"[0-9A-Fa-f]{6}", cleaned):
+        return f"#{cleaned.upper()}"
+    return None
+
+
+def clamp_ratio(value: float) -> float:
+    return round(max(0.0, min(1.0, value)), 4)
+
+
+def extract_slide_size(z: zipfile.ZipFile, names: set[str]) -> tuple[int, int]:
+    if "ppt/presentation.xml" not in names:
+        return DEFAULT_SLIDE_WIDTH_EMU, DEFAULT_SLIDE_HEIGHT_EMU
+    try:
+        root = ET.fromstring(z.read("ppt/presentation.xml"))
+        ns = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main"}
+        size = root.find(".//p:sldSz", ns)
+        if size is not None:
+            return (
+                int(size.get("cx", str(DEFAULT_SLIDE_WIDTH_EMU))),
+                int(size.get("cy", str(DEFAULT_SLIDE_HEIGHT_EMU))),
+            )
+    except Exception:
+        pass
+    return DEFAULT_SLIDE_WIDTH_EMU, DEFAULT_SLIDE_HEIGHT_EMU
+
+
+def color_from_node(node: ET.Element | None, scheme_colors: dict[str, str] | None = None) -> str | None:
+    if node is None:
+        return None
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    srgb = node.find(".//a:srgbClr", ns)
+    if srgb is not None:
+        color = normalize_hex_color(srgb.get("val"))
+        if color:
+            return color
+    sys_color = node.find(".//a:sysClr", ns)
+    if sys_color is not None:
+        color = normalize_hex_color(sys_color.get("lastClr"))
+        if color:
+            return color
+    scheme = node.find(".//a:schemeClr", ns)
+    if scheme is not None and scheme_colors:
+        return scheme_colors.get(scheme.get("val", ""))
+    return None
+
+
+def extract_theme_colors(z: zipfile.ZipFile, names: set[str]) -> dict[str, str]:
+    colors: dict[str, str] = {}
+    if "ppt/theme/theme1.xml" not in names:
+        return colors
+    try:
+        tree = ET.fromstring(z.read("ppt/theme/theme1.xml"))
+        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        for child in tree.findall(".//a:clrScheme/*", ns):
+            key = child.tag.split("}", 1)[-1]
+            color = color_from_node(child)
+            if color:
+                colors[key] = color
+    except Exception:
+        pass
+    return colors
+
+
+def extract_slide_background(root: ET.Element, fallback: str, scheme_colors: dict[str, str]) -> str:
+    ns = {
+        "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    }
+    bg_color = color_from_node(root.find(".//p:cSld/p:bg", ns), scheme_colors)
+    return bg_color or fallback
+
+
+def collect_main_colors(root: ET.Element, fallback_colors: list[str], scheme_colors: dict[str, str]) -> list[str]:
+    counts: dict[str, int] = {}
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    for color_node in root.findall(".//a:srgbClr", ns):
+        color = normalize_hex_color(color_node.get("val"))
+        if color:
+            counts[color] = counts.get(color, 0) + 1
+    for scheme_node in root.findall(".//a:schemeClr", ns):
+        color = scheme_colors.get(scheme_node.get("val", ""))
+        if color:
+            counts[color] = counts.get(color, 0) + 1
+
+    ranked = sorted(counts, key=lambda item: counts[item], reverse=True)
+    result = []
+    for color in [*fallback_colors, *ranked]:
+        normalized = normalize_hex_color(color)
+        if normalized and normalized not in result:
+            result.append(normalized)
+        if len(result) >= 6:
+            break
+    return result
+
+
+def extract_text_box_style(shape: ET.Element, style_spec: dict, scheme_colors: dict[str, str]) -> dict:
+    ns = {
+        "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    }
+    font_family = style_spec.get("font_family", "Calibri")
+    font_size = 24.0
+    color = style_spec.get("accent_color", "#4F8EF7")
+    bold = False
+    italic = False
+
+    for props in shape.findall(".//a:rPr", ns) + shape.findall(".//a:endParaRPr", ns):
+        if props.get("sz"):
+            try:
+                font_size = int(props.get("sz", "2400")) / 100
+            except ValueError:
+                pass
+        if props.get("b") == "1":
+            bold = True
+        if props.get("i") == "1":
+            italic = True
+        latin = props.find("./a:latin", ns)
+        if latin is not None and latin.get("typeface"):
+            typeface = latin.get("typeface", "")
+            if typeface not in ("+mj-lt", "+mn-lt"):
+                font_family = typeface
+        fill_color = color_from_node(props.find("./a:solidFill", ns), scheme_colors)
+        if fill_color:
+            color = fill_color
+        break
+
+    paragraph = shape.find(".//a:pPr", ns)
+    align = paragraph.get("algn", "l") if paragraph is not None else "l"
+    return {
+        "font_family": font_family,
+        "font_size": round(font_size, 1),
+        "color": color,
+        "bold": bold,
+        "italic": italic,
+        "align": align if align in {"l", "ctr", "r", "just"} else "l",
+    }
+
+
+def count_slide_images(root: ET.Element) -> int:
+    ns = {
+        "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    }
+    image_refs = set()
+    for blip in root.findall(".//a:blip", ns):
+        embed = blip.get(f"{{{ns['r']}}}embed") or blip.get(f"{{{ns['r']}}}link")
+        if embed:
+            image_refs.add(embed)
+    picture_count = len(root.findall(".//p:pic", ns))
+    return max(len(image_refs), picture_count)
+
+
+def extract_slide_templates(content: bytes, style_spec: dict, max_templates: int = SLIDE_TEMPLATE_LIMIT) -> list[dict]:
+    candidates: list[dict] = []
+    layout_keys: set[tuple] = set()
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            names = set(z.namelist())
+            width, height = extract_slide_size(z, names)
+            scheme_colors = extract_theme_colors(z, names)
+            slide_paths = sorted(
+                [n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)],
+                key=slide_number_from_path,
+            )
+            ns = {
+                "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+                "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+            }
+
+            for slide_path in slide_paths:
+                root = ET.fromstring(z.read(slide_path))
+                slide_number = slide_number_from_path(slide_path)
+                image_count = count_slide_images(root)
+                bg_color = extract_slide_background(root, style_spec.get("bg_color", "#1A1A2E"), scheme_colors)
+                colors = collect_main_colors(
+                    root,
+                    [bg_color, style_spec.get("accent_color", "#4F8EF7")],
+                    scheme_colors,
+                )
+                text_boxes = []
+                seen_box_keys: set[tuple] = set()
+
+                for shape in root.findall(".//p:sp", ns):
+                    if shape.find("./p:txBody", ns) is None:
+                        continue
+                    text = extract_xml_text(ET.tostring(shape, encoding="utf-8"))
+                    if not text.strip():
+                        continue
+                    xfrm = shape.find("./p:spPr/a:xfrm", ns)
+                    off = xfrm.find("./a:off", ns) if xfrm is not None else None
+                    ext = xfrm.find("./a:ext", ns) if xfrm is not None else None
+                    if off is None or ext is None:
+                        continue
+                    try:
+                        x = int(off.get("x", "0"))
+                        y = int(off.get("y", "0"))
+                        w = int(ext.get("cx", "0"))
+                        h = int(ext.get("cy", "0"))
+                    except ValueError:
+                        continue
+                    if w <= width * 0.03 or h <= height * 0.02:
+                        continue
+                    style = extract_text_box_style(shape, style_spec, scheme_colors)
+                    if y / height > 0.86 and w / width < 0.22 and style.get("font_size", 24) <= 11:
+                        continue
+                    box_key = (
+                        round(x / width, 3),
+                        round(y / height, 3),
+                        round(w / width, 3),
+                        round(h / height, 3),
+                    )
+                    if box_key in seen_box_keys:
+                        continue
+                    seen_box_keys.add(box_key)
+
+                    ph = shape.find("./p:nvSpPr/p:nvPr/p:ph", ns)
+                    ph_type = ph.get("type", "") if ph is not None else ""
+                    role = "title" if ph_type in {"title", "ctrTitle", "subTitle"} else "body"
+                    box = {
+                        "id": f"box_{len(text_boxes) + 1}",
+                        "role": role,
+                        "x": clamp_ratio(x / width),
+                        "y": clamp_ratio(y / height),
+                        "w": clamp_ratio(w / width),
+                        "h": clamp_ratio(h / height),
+                        **style,
+                    }
+                    text_boxes.append(box)
+
+                if not text_boxes:
+                    continue
+                text_boxes = sorted(text_boxes, key=lambda item: (item["y"], item["x"]))[:SLIDE_TEMPLATE_MAX_TEXT_BOXES]
+                primary = max(
+                    text_boxes,
+                    key=lambda item: (
+                        float(item.get("font_size", 12)) * max(0.05, item["w"] * item["h"]),
+                        item["w"] * item["h"],
+                    ),
+                )
+                for box in text_boxes:
+                    if box["role"] == "title" and box is not primary:
+                        box["role"] = "body"
+                primary["role"] = "title"
+                for index, box in enumerate(text_boxes, start=1):
+                    box["id"] = f"box_{index}"
+
+                layout_key = tuple(
+                    (round(box["x"], 1), round(box["y"], 1), round(box["w"], 1), round(box["h"], 1))
+                    for box in text_boxes
+                )
+                if layout_key in layout_keys:
+                    continue
+                layout_keys.add(layout_key)
+
+                candidates.append({
+                    "id": "",
+                    "source_slide_index": slide_number - 1,
+                    "source_slide_number": slide_number,
+                    "image_count": image_count,
+                    "description": (
+                        f"Slide {slide_number} layout with "
+                        f"{sum(1 for box in text_boxes if box['role'] == 'title')} title box(es) "
+                        f"and {sum(1 for box in text_boxes if box['role'] != 'title')} content box(es); "
+                        f"{image_count} image(s)"
+                    ),
+                    "width": width,
+                    "height": height,
+                    "bg_color": bg_color,
+                    "colors": colors,
+                    "text_boxes": text_boxes,
+                })
+    except Exception:
+        return []
+
+    candidates.sort(
+        key=lambda template: (
+            template.get("image_count", 999),
+            -sum(1 for box in template.get("text_boxes", []) if box.get("role") != "title"),
+            template.get("source_slide_number", 999),
+        )
+    )
+    selected = candidates[:max_templates]
+    for index, template in enumerate(selected, start=1):
+        template["id"] = f"template_{index}"
+    return selected
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     model = get_embedding_model()
     embeddings = model.encode(texts, normalize_embeddings=True)
@@ -462,6 +758,7 @@ def rebuild_deck_vector_index(
     collection_name = collection_name_for_deck(deck_id)
     now = time.time()
     style_spec = extract_deck_style(content)
+    style_spec["slide_templates"] = extract_slide_templates(content, style_spec)
 
     try:
         slide_documents = extract_pptx_slide_documents(content)
@@ -832,6 +1129,31 @@ async def generate_slide_background(
 ) -> None:
     deck_info = find_deck_index(session.file_name)
     style_spec = (deck_info.style_spec or {}) if deck_info else {}
+    templates = (style_spec.get("slide_templates") or [])[:SLIDE_TEMPLATE_LIMIT]
+    template_choices = [
+        {
+            "id": template.get("id"),
+            "description": template.get("description"),
+            "source_slide_number": template.get("source_slide_number"),
+            "image_count": template.get("image_count", 0),
+            "bg_color": template.get("bg_color"),
+            "colors": template.get("colors", [])[:6],
+            "text_boxes": [
+                {
+                    "id": box.get("id"),
+                    "role": box.get("role"),
+                    "x": box.get("x"),
+                    "y": box.get("y"),
+                    "w": box.get("w"),
+                    "h": box.get("h"),
+                    "font_size": box.get("font_size"),
+                    "align": box.get("align"),
+                }
+                for box in template.get("text_boxes", [])
+            ],
+        }
+        for template in templates
+    ]
 
     fake_session = type("_S", (), {
         "deck_id": session.deck_id,
@@ -855,10 +1177,17 @@ async def generate_slide_background(
         f"Deck style spec: bg_color={style_spec.get('bg_color', '#1a1a2e')}, "
         f"accent_color={style_spec.get('accent_color', '#4f8ef7')}, "
         f"font_family={style_spec.get('font_family', 'Calibri')}\n\n"
+        "Clean slide templates extracted from the user's deck. These are original slide text boxes "
+        "with their text wiped; choose the template whose box count and layout best fit the topic:\n"
+        f"{json.dumps(template_choices, ensure_ascii=True)}\n\n"
         "Return EXACTLY one JSON object:\n"
-        '{"title": "<5-8 word title>", "bullets": ["<point 1>", "<point 2>", "<point 3>"], '
+        '{"template_id": "<one template id or null>", "title": "<5-8 word title>", '
+        '"text_boxes": [{"id": "<box id>", "text": "<text for that box>"}], '
+        '"bullets": ["<fallback point 1>", "<fallback point 2>", "<fallback point 3>"], '
         '"notes": "<1-2 sentence speaker notes>", '
         '"style_hint": {"bg": "<hex>", "accent": "<hex>", "font": "<family>"}}\n'
+        "Use concise slide text. Put the title in the title box when one exists. "
+        "Fill every useful content box; leave no box id out unless it is decorative or too small. "
         "Return only the JSON. No markdown, no explanation."
     )
 
@@ -867,13 +1196,26 @@ async def generate_slide_background(
         parsed = parse_json_reply(reply)
         if not isinstance(parsed, dict) or "title" not in parsed:
             return
+        template_id = parsed.get("template_id")
+        selected_template = next(
+            (template for template in templates if template.get("id") == template_id),
+            templates[0] if templates else None,
+        )
+        text_boxes = parsed.get("text_boxes", [])
+        if not isinstance(text_boxes, list):
+            text_boxes = []
+        latest_session = presentation_sessions.get(presentation_id)
+        insertion_slide = latest_session.current_slide if latest_session else after_slide
         entry = {
             "index": len(generated_slides.get(presentation_id, [])),
             "title": parsed.get("title", topic),
             "bullets": parsed.get("bullets", []),
+            "template_id": selected_template.get("id") if selected_template else None,
+            "template": selected_template,
+            "text_boxes": text_boxes,
             "notes": parsed.get("notes", ""),
             "style_hint": parsed.get("style_hint", style_spec),
-            "after_slide": after_slide,
+            "after_slide": insertion_slide,
             "topic": topic,
             "created_at": time.time(),
         }
@@ -990,6 +1332,38 @@ def format_slide_for_agent(slide: PresentationSlide, current_slide: int) -> str:
     )
 
 
+def format_generated_slides_for_agent(presentation_id: str, current_slide: int) -> str:
+    slides = generated_slides.get(presentation_id, [])
+    if not slides:
+        return "[no generated supplemental slides yet]"
+
+    blocks = []
+    for slide in slides[-8:]:
+        text_box_text = []
+        for box in slide.get("text_boxes", []) or []:
+            if isinstance(box, dict) and box.get("text"):
+                text_box_text.append(str(box.get("text", "")))
+        bullets = slide.get("bullets", []) or []
+        body = "\n".join(
+            part
+            for part in [
+                "\n".join(str(item) for item in bullets if item),
+                "\n".join(text_box_text),
+                str(slide.get("notes", "")),
+            ]
+            if part
+        )
+        marker = "CURRENT_INSERTION_POINT" if slide.get("after_slide") == current_slide else "GENERATED"
+        blocks.append(
+            f"[{marker}] generated_index={slide.get('index')}, "
+            f"after_slide={slide.get('after_slide')}, template_id={slide.get('template_id') or '[none]'}\n"
+            f"title: {slide.get('title') or '[untitled]'}\n"
+            f"topic: {slide.get('topic') or '[unknown]'}\n"
+            f"content: {compact_agent_text(body, 1200) or '[empty]'}"
+        )
+    return "\n\n".join(blocks)
+
+
 def build_presentation_outline(session: PresentationSession) -> str:
     slides = sorted(session.slides, key=lambda item: item.slide_index)
     current = [slide for slide in slides if slide.slide_index == session.current_slide]
@@ -1076,20 +1450,28 @@ async def analyze_transcript_with_brev(
         )
 
     vector_context = format_vector_matches_for_agent(vector_search, session.current_slide)
+    generated_context = format_generated_slides_for_agent(payload.presentation_id, session.current_slide)
     prompt = (
-        "You are tracking a live presentation. Use only the vector-retrieved slide context below; "
-        "do not open files, run tools, or assume content from slides that were not retrieved. "
+        "You are tracking a live presentation. Use only the vector-retrieved deck context and "
+        "generated supplemental slide context below; do not open files, run tools, or assume "
+        "content from slides that were not retrieved or listed. "
         "Classify the speaker's transcript chunk into exactly one coverage_status:\n"
         "- current_slide: the content is covered by the current slide.\n"
         "- other_slide: the content is not covered by the current slide, but is covered by one "
-        "of the retrieved slides from this same presentation, including a future slide.\n"
-        "- not_covered: the content is not covered by the retrieved slide context, or the only "
+        "of the retrieved deck slides, including a future slide, or by a generated supplemental slide.\n"
+        "- not_covered: the content is not covered by the retrieved deck context or generated "
+        "supplemental slides, or the only "
         "matches are weak and do not actually support the transcript topic.\n\n"
-        "If coverage_status is other_slide, set matched_slide to the best matching slide_index. "
-        "If not_covered, set matched_slide to null and topic to the missing topic.\n\n"
+        "Generated supplemental slides are already part of this live presentation. If one covers "
+        "the transcript topic, return other_slide so a duplicate slide is not generated. "
+        "If coverage_status is other_slide because of a retrieved deck slide, set matched_slide "
+        "to the best matching slide_index. If it is covered by a generated slide, set matched_slide "
+        "to null and mention the generated_index in reason. If not_covered, set matched_slide to "
+        "null and topic to the missing topic.\n\n"
         f"Current slide_index: {session.current_slide}\n"
         f"Vector search threshold: distance <= {VECTOR_RELEVANCE_DISTANCE_THRESHOLD} is strong; higher is weak.\n\n"
         f"Vector-retrieved slide context:\n{vector_context}\n\n"
+        f"Generated supplemental slide context:\n{generated_context}\n\n"
         f"Transcript chunk:\n{transcript}\n\n"
         "Return exactly one JSON object and nothing else. Schema:\n"
         '{"coverage_status": "current_slide|other_slide|not_covered", '
@@ -1197,6 +1579,7 @@ async def start_presentation(payload: PresentationStartRequest):
         "vectorization_enabled": session.vectorization_status == "ready",
         "vectorization_status": session.vectorization_status,
         "chunks_indexed": session.chunks_indexed,
+        "slide_templates_indexed": len((deck_index.style_spec or {}).get("slide_templates", [])) if deck_index else 0,
         "vectorization_error": session.vectorization_error,
         "material_files_indexed": session.material_files_indexed,
         "material_chunks_indexed": session.material_chunks_indexed,
@@ -1258,6 +1641,7 @@ async def upload_pptx_to_sandbox(file: UploadFile = File(...)):
         "vectorization_enabled": deck_index.vectorization_status == "ready",
         "vectorization_status": deck_index.vectorization_status,
         "chunks_indexed": deck_index.chunks_indexed,
+        "slide_templates_indexed": len((deck_index.style_spec or {}).get("slide_templates", [])),
         "vectorization_error": deck_index.vectorization_error,
         "material_files_indexed": deck_index.material_files_indexed,
         "material_chunks_indexed": deck_index.material_chunks_indexed,
@@ -1338,6 +1722,7 @@ async def upload_pptx(file: UploadFile = File(...)):
         "vectorization_enabled": deck_index.vectorization_status == "ready",
         "vectorization_status": deck_index.vectorization_status,
         "chunks_indexed": deck_index.chunks_indexed,
+        "slide_templates_indexed": len((deck_index.style_spec or {}).get("slide_templates", [])),
         "vectorization_error": deck_index.vectorization_error,
         "material_files_indexed": deck_index.material_files_indexed,
         "material_chunks_indexed": deck_index.material_chunks_indexed,

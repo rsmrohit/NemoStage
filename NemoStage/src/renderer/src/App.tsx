@@ -303,10 +303,13 @@ function AppContent(): React.JSX.Element {
     const boundedIndex = Math.max(0, Math.min(index, Math.max(liveTotalSlides - 1, 0)))
     setLiveSlideIndex(boundedIndex)
 
-    if (boundedIndex > 0) {
-      goToSlide(boundedIndex - 1)
+    const slot = liveMergedSlides[boundedIndex]
+    if (slot?.type === 'deck') {
+      goToSlide(slot.deckIndex)
+    } else if (slot?.type === 'generated') {
+      goToSlide(slot.slide.after_slide)
     }
-  }, [goToSlide, liveTotalSlides])
+  }, [goToSlide, liveMergedSlides, liveTotalSlides])
 
   const nextLiveSlide = useCallback((): void => {
     goToLiveSlide(liveSlideIndex + 1)
@@ -725,7 +728,7 @@ function AppContent(): React.JSX.Element {
     }
 
     await window.electronAPI.clearSession(selectedSessionId)
-    await loadRecentSessions()
+    setRecentSessions((prev) => prev.filter((s) => s.sessionId !== selectedSessionId))
 
     if (selectedSessionId === sessionId) {
       await window.electronAPI.stopTranscriptListener()
@@ -1141,6 +1144,10 @@ function AppContent(): React.JSX.Element {
                         ? `Vector index ready (${vectorizationInfo.chunks_indexed ?? 0} slide chunks${
                             vectorizationInfo.material_chunks_indexed
                               ? `, ${vectorizationInfo.material_chunks_indexed} material chunks`
+                              : ''
+                          }${
+                            vectorizationInfo.slide_templates_indexed
+                              ? `, ${vectorizationInfo.slide_templates_indexed} templates`
                               : ''
                           })`
                         : `Vector search ${vectorizationInfo.vectorization_status ?? 'unavailable'}`}

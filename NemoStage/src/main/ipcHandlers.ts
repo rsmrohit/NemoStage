@@ -26,6 +26,7 @@ import {
 
 import { parsePPTXStructure } from './services/pptxXmlParser'
 import { downloadGoogleFonts } from './services/googleFontsDownloader'
+import { pathToMediaUrl } from './services/mediaProtocol'
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
@@ -54,11 +55,6 @@ function emitToRenderer(window: BrowserWindow | null, channel: string, payload: 
   if (window && !window.isDestroyed()) {
     window.webContents.send(channel, payload)
   }
-}
-
-function toFileUrl(absolutePath: string): string {
-  const normalized = absolutePath.replace(/\\/g, '/')
-  return `nemostage-media:///${encodeURI(normalized)}`
 }
 
 async function resolveTranscriptDirectory(): Promise<string> {
@@ -252,8 +248,8 @@ async function hydrateSessionFromDisk(sessionId: string): Promise<SessionRuntime
     slideCount: metadata.slideCount,
     slides: slidesFromDisk.map((slide) => ({
       slideIndex: slide.slideIndex,
-      imagePaths: slide.imagePaths.map(toFileUrl),
-      thumbnailPath: slide.imagePaths[0] ? toFileUrl(slide.imagePaths[0]) : null
+      imagePaths: slide.imagePaths.map(pathToMediaUrl),
+      thumbnailPath: slide.imagePaths[0] ? pathToMediaUrl(slide.imagePaths[0]) : null
     })),
     doclingStatus: doclingExists ? 'ready' : 'failed',
     fonts,
@@ -497,8 +493,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
       slideCount: extraction.slides.length,
       slides: extraction.slides.map((slide) => ({
         slideIndex: slide.slideIndex,
-        imagePaths: slide.imagePaths.map(toFileUrl),
-        thumbnailPath: slide.imagePaths[0] ? toFileUrl(slide.imagePaths[0]) : null
+        imagePaths: slide.imagePaths.map(pathToMediaUrl),
+        thumbnailPath: slide.imagePaths[0] ? pathToMediaUrl(slide.imagePaths[0]) : null
       })),
       doclingStatus: 'pending',
       fonts: extraction.fonts,
@@ -579,7 +575,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
         return {
           type: 'image',
           bbox: element.bbox,
-          content: element.imagePath ? toFileUrl(element.imagePath) : '',
+          content: element.imagePath ? pathToMediaUrl(element.imagePath) : '',
           style: {},
           crop: element.crop,
           rotation: element.rotation
@@ -647,10 +643,10 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     if (!manifest?.embeddedFonts?.length) return []
     const entries = manifest.embeddedFonts.map((font) => ({
       name: font.name,
-      url: toFileUrl(font.path),
-      boldUrl: font.bold ? toFileUrl(font.bold) : undefined,
-      italicUrl: font.italic ? toFileUrl(font.italic) : undefined,
-      boldItalicUrl: font.boldItalic ? toFileUrl(font.boldItalic) : undefined
+      url: pathToMediaUrl(font.path),
+      boldUrl: font.bold ? pathToMediaUrl(font.bold) : undefined,
+      italicUrl: font.italic ? pathToMediaUrl(font.italic) : undefined,
+      boldItalicUrl: font.boldItalic ? pathToMediaUrl(font.boldItalic) : undefined
     }))
     console.log('[pptx:getSessionFonts] Returning font entries:', entries.map(e =>
       `${e.name} [regular${e.boldUrl ? ' bold' : ''}${e.italicUrl ? ' italic' : ''}${e.boldItalicUrl ? ' boldItalic' : ''}]`

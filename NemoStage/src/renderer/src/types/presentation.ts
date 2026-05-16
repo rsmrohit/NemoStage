@@ -119,10 +119,46 @@ export interface StyleHint {
   font: string
 }
 
+export interface GeneratedTemplateTextBox {
+  id: string
+  role: string
+  x: number
+  y: number
+  w: number
+  h: number
+  font_family?: string
+  font_size?: number
+  color?: string
+  bold?: boolean
+  italic?: boolean
+  align?: 'l' | 'ctr' | 'r' | 'just'
+}
+
+export interface GeneratedSlideTemplate {
+  id: string
+  source_slide_index: number
+  source_slide_number: number
+  image_count?: number
+  description: string
+  width: number
+  height: number
+  bg_color: string
+  colors: string[]
+  text_boxes: GeneratedTemplateTextBox[]
+}
+
+export interface GeneratedTextBoxContent {
+  id: string
+  text: string
+}
+
 export interface GeneratedSlide {
   index: number
   title: string
   bullets: string[]
+  template_id?: string | null
+  template?: GeneratedSlideTemplate | null
+  text_boxes?: GeneratedTextBoxContent[]
   notes: string
   style_hint: StyleHint
   after_slide: number

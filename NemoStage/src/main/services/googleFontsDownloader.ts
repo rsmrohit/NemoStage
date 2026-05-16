@@ -3,6 +3,7 @@ import fs from 'fs-extra'
 import path from 'path'
 import { app } from 'electron'
 import type { EmbeddedFontEntry } from '../types'
+import { pathToMediaUrl } from './mediaProtocol'
 
 // Weight suffix → numeric weight. Ordered longest-first to avoid partial matches.
 const WEIGHT_SUFFIXES: [string, number][] = [
@@ -74,10 +75,6 @@ function httpsDownload(url: string): Promise<Buffer> {
   })
 }
 
-function toMediaUrl(absolutePath: string): string {
-  return `nemostage-media:///${encodeURI(absolutePath.replace(/\\/g, '/'))}`
-}
-
 export async function downloadGoogleFonts(pptxFontNames: string[]): Promise<EmbeddedFontEntry[]> {
   const cacheDir = path.join(app.getPath('userData'), 'font-cache')
   await fs.ensureDir(cacheDir)
@@ -144,10 +141,10 @@ export async function downloadGoogleFonts(pptxFontNames: string[]): Promise<Embe
 
       entries.push({
         name: pptxName,
-        url: toMediaUrl(regularPath),
-        italicUrl: italicPath ? toMediaUrl(italicPath) : undefined,
-        boldUrl: boldPath ? toMediaUrl(boldPath) : undefined,
-        boldItalicUrl: boldItalicPath ? toMediaUrl(boldItalicPath) : undefined
+        url: pathToMediaUrl(regularPath),
+        italicUrl: italicPath ? pathToMediaUrl(italicPath) : undefined,
+        boldUrl: boldPath ? pathToMediaUrl(boldPath) : undefined,
+        boldItalicUrl: boldItalicPath ? pathToMediaUrl(boldItalicPath) : undefined
       })
 
       console.log(`[googleFonts] ✅ "${pptxName}"`)

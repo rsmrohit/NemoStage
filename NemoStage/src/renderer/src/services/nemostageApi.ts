@@ -64,6 +64,7 @@ export interface VectorizationFields {
   vectorization_enabled?: boolean
   vectorization_status?: 'ready' | 'failed' | 'unavailable'
   chunks_indexed?: number
+  slide_templates_indexed?: number
   vectorization_error?: string | null
   material_files_indexed?: number
   material_chunks_indexed?: number
