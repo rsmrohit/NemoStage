@@ -41,6 +41,579 @@ class PersonState:
     signals: Dict
 
 
+@dataclass
+class EngagementBucketSummary:
+    """Room-level engagement summary for one time bucket."""
+    timestamp_ms: int
+    engagement_score: float
+    audience_count: int
+    confidence: float
+    change: float
+    dominant_signals: List[str]
+
+
+class EngagementAggregator:
+    """Aggregate per-person frame scores into smoothed room-level buckets."""
+
+    def __init__(
+        self,
+        fps: float = 30.0,
+        bucket_seconds: float = 5.0,
+        previous_weight: float = 0.7,
+        current_weight: float = 0.3,
+    ):
+        self.fps = fps if fps > 0 else 30.0
+        self.bucket_seconds = bucket_seconds if bucket_seconds > 0 else 5.0
+        self.previous_weight = previous_weight
+        self.current_weight = current_weight
+        self.bucket_frame_scores: List[float] = []
+        self.bucket_confidences: List[float] = []
+        self.bucket_audience_counts: List[int] = []
+        self.bucket_state_counts: Dict[str, int] = defaultdict(int)
+        self.current_bucket_index: Optional[int] = None
+        self.previous_smoothed_score: Optional[float] = None
+
+    def add_frame(self, frame_id: int, person_states: List[PersonState]) -> Optional[EngagementBucketSummary]:
+        """Add one frame and return a completed bucket summary when available."""
+        timestamp_ms = self._frame_to_ms(frame_id)
+        bucket_index = int((timestamp_ms / 1000.0) // self.bucket_seconds)
+
+        if self.current_bucket_index is None:
+            self.current_bucket_index = bucket_index
+
+        completed_summary = None
+        if bucket_index != self.current_bucket_index and self.bucket_frame_scores:
+            completed_summary = self._build_summary(self.current_bucket_index)
+            self._reset_bucket(bucket_index)
+
+        frame_score, frame_confidence, audience_count, state_counts = self._score_frame(person_states)
+        self.bucket_frame_scores.append(frame_score)
+        self.bucket_confidences.append(frame_confidence)
+        self.bucket_audience_counts.append(audience_count)
+        for state, count in state_counts.items():
+            self.bucket_state_counts[state] += count
+
+        return completed_summary
+
+    def flush(self) -> Optional[EngagementBucketSummary]:
+        """Return the current partial bucket summary, if any frames were collected."""
+        if self.current_bucket_index is None or not self.bucket_frame_scores:
+            return None
+        summary = self._build_summary(self.current_bucket_index)
+        self._reset_bucket(None)
+        return summary
+
+    def _score_frame(self, person_states: List[PersonState]) -> Tuple[float, float, int, Dict[str, int]]:
+        """Compute one confidence-weighted room score from the current people."""
+        if not person_states:
+            fallback_score = self.previous_smoothed_score if self.previous_smoothed_score is not None else 0.0
+            return fallback_score, 0.0, 0, {}
+
+        weighted_score_sum = 0.0
+        weight_sum = 0.0
+        state_counts: Dict[str, int] = defaultdict(int)
+        audience_count = 0
+
+        for person in person_states:
+            state_counts[person.state] += 1
+            presence_weight = 0.2 if person.state == "absent" else 1.0
+            confidence = max(0.0, min(1.0, float(person.confidence)))
+            weight = confidence * presence_weight
+            weighted_score_sum += float(person.engagement_score) * weight
+            weight_sum += weight
+
+            if person.state != "absent":
+                audience_count += 1
+
+        if weight_sum <= 0:
+            fallback_score = self.previous_smoothed_score if self.previous_smoothed_score is not None else 0.0
+            return fallback_score, 0.0, audience_count, state_counts
+
+        frame_score = weighted_score_sum / weight_sum
+        frame_confidence = min(1.0, weight_sum / max(len(person_states), 1))
+        return frame_score, frame_confidence, audience_count, state_counts
+
+    def _build_summary(self, bucket_index: int) -> EngagementBucketSummary:
+        raw_score = sum(self.bucket_frame_scores) / len(self.bucket_frame_scores)
+        confidence = sum(self.bucket_confidences) / len(self.bucket_confidences)
+        audience_count = round(sum(self.bucket_audience_counts) / len(self.bucket_audience_counts))
+
+        if self.previous_smoothed_score is None:
+            smoothed_score = raw_score
+            change = 0.0
+        else:
+            smoothed_score = (
+                self.previous_weight * self.previous_smoothed_score
+                + self.current_weight * raw_score
+            )
+            change = smoothed_score - self.previous_smoothed_score
+
+        self.previous_smoothed_score = smoothed_score
+        dominant_signals = self._dominant_signals()
+
+        return EngagementBucketSummary(
+            timestamp_ms=int(bucket_index * self.bucket_seconds * 1000),
+            engagement_score=max(0.0, min(1.0, smoothed_score)),
+            audience_count=int(audience_count),
+            confidence=max(0.0, min(1.0, confidence)),
+            change=change,
+            dominant_signals=dominant_signals,
+        )
+
+    def _dominant_signals(self) -> List[str]:
+        state_to_signal = {
+            "engaged": "forward_attention",
+            "looking_down": "looking_down",
+            "on_phone": "phone_use",
+            "asleep": "sleep_like",
+            "distracted": "looking_away",
+            "absent": "brief_absence",
+            "neutral": "neutral_attention",
+        }
+        sorted_states = sorted(self.bucket_state_counts.items(), key=lambda item: item[1], reverse=True)
+        signals = []
+        for state, _count in sorted_states:
+            signal = state_to_signal.get(state, state)
+            if signal not in signals:
+                signals.append(signal)
+            if len(signals) == 3:
+                break
+        return signals
+
+    def _reset_bucket(self, bucket_index: Optional[int]) -> None:
+        self.current_bucket_index = bucket_index
+        self.bucket_frame_scores = []
+        self.bucket_confidences = []
+        self.bucket_audience_counts = []
+        self.bucket_state_counts = defaultdict(int)
+
+    def _frame_to_ms(self, frame_id: int) -> int:
+        return int((frame_id / self.fps) * 1000)
+
+
+class AudienceMemberEngagementTracker:
+    """Track recurring audience members and write per-member engagement JSON."""
+
+    def __init__(
+        self,
+        output_dir: Path,
+        session_id: str,
+        fps: float = 30.0,
+        bucket_seconds: float = 5.0,
+        recognition_threshold: float = 0.80,
+        min_member_frames: int = 10,
+        max_feature_prototypes: int = 5,
+    ):
+        self.fps = fps if fps > 0 else 30.0
+        self.bucket_seconds = bucket_seconds if bucket_seconds > 0 else 5.0
+        self.recognition_threshold = recognition_threshold
+        self.min_member_frames = max(1, min_member_frames)
+        self.max_feature_prototypes = max(1, max_feature_prototypes)
+        self.session_id = session_id
+        self.output_dir = Path(output_dir) / f"audience_engagement_{session_id}"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.member_feature_file = self.output_dir / "face_feature_registry.json"
+
+        self.next_member_index = 1
+        self.track_to_member: Dict[int, str] = {}
+        self.member_signatures: Dict[str, np.ndarray] = {}
+        self.member_feature_prototypes: Dict[str, List[np.ndarray]] = {}
+        self.member_last_bbox: Dict[str, Tuple[int, int, int, int]] = {}
+        self.member_last_seen_ms: Dict[str, int] = {}
+        self.member_files: Dict[str, Path] = {}
+        self.member_payloads: Dict[str, Dict] = {}
+        self.member_buckets: Dict[str, Dict] = {}
+        self.pending_tracks: Dict[int, Dict] = {}
+
+    def add_frame(self, frame_id: int, frame: np.ndarray, person_states: List[PersonState]) -> None:
+        """Assign current people to stable members and collect per-member bucket stats."""
+        timestamp_ms = self._frame_to_ms(frame_id)
+        bucket_index = int((timestamp_ms / 1000.0) // self.bucket_seconds)
+        used_visible_members = set()
+
+        for person in person_states:
+            member_id = self._resolve_member(frame, person, timestamp_ms, used_visible_members)
+            if member_id is None:
+                continue
+            if person.state != "absent":
+                used_visible_members.add(member_id)
+            self._add_member_state(member_id, bucket_index, timestamp_ms, person)
+        self._cleanup_pending_tracks(timestamp_ms)
+
+    def flush(self) -> None:
+        """Write any partial per-member buckets."""
+        for member_id in list(self.member_buckets.keys()):
+            self._finalize_member_bucket(member_id)
+        self._write_feature_registry()
+
+    def _resolve_member(
+        self,
+        frame: np.ndarray,
+        person: PersonState,
+        timestamp_ms: int,
+        used_visible_members: set,
+    ) -> Optional[str]:
+        if person.track_id in self.track_to_member:
+            member_id = self.track_to_member[person.track_id]
+            if person.state != "absent":
+                self._update_member_signature(member_id, frame, person.bbox)
+                self._remember_member_position(member_id, person.bbox, timestamp_ms)
+            return member_id
+
+        if person.state == "absent":
+            return None
+
+        signature = self._face_signature(frame, person.bbox)
+        member_id, similarity = self._find_matching_member(
+            signature,
+            used_visible_members,
+        )
+        if member_id is not None:
+            self._merge_signature(member_id, signature)
+            self._remember_member_position(member_id, person.bbox, timestamp_ms)
+            self.track_to_member[person.track_id] = member_id
+            self.pending_tracks.pop(person.track_id, None)
+            return member_id
+
+        member_id = self._resolve_pending_track(
+            person.track_id,
+            signature,
+            person.bbox,
+            timestamp_ms,
+            used_visible_members,
+        )
+        if member_id is None:
+            return None
+
+        if signature is not None:
+            self.member_signatures[member_id] = signature
+        self._remember_member_position(member_id, person.bbox, timestamp_ms)
+        self.track_to_member[person.track_id] = member_id
+        return member_id
+
+    def _add_member_state(
+        self,
+        member_id: str,
+        bucket_index: int,
+        timestamp_ms: int,
+        person: PersonState,
+    ) -> None:
+        bucket = self.member_buckets.get(member_id)
+        if bucket is None:
+            bucket = self._new_bucket(bucket_index)
+            self.member_buckets[member_id] = bucket
+        elif bucket["bucket_index"] != bucket_index:
+            self._finalize_member_bucket(member_id)
+            bucket = self._new_bucket(bucket_index)
+            self.member_buckets[member_id] = bucket
+
+        bucket["scores"].append(float(person.engagement_score))
+        bucket["confidences"].append(float(person.confidence))
+        bucket["states"][person.state] += 1
+        bucket["activities"][person.likely_activity] += 1
+        bucket["track_ids"].add(int(person.track_id))
+        bucket["last_timestamp_ms"] = int(timestamp_ms)
+
+    def _finalize_member_bucket(self, member_id: str) -> None:
+        bucket = self.member_buckets.pop(member_id, None)
+        if bucket is None or not bucket["scores"]:
+            return
+
+        score = sum(bucket["scores"]) / len(bucket["scores"])
+        confidence = sum(bucket["confidences"]) / len(bucket["confidences"])
+        dominant_state = self._top_key(bucket["states"])
+        dominant_activity = self._top_key(bucket["activities"])
+        record = {
+            "timestamp_ms": int(bucket["bucket_index"] * self.bucket_seconds * 1000),
+            "end_timestamp_ms": int(bucket["last_timestamp_ms"]),
+            "engagement_score": max(0.0, min(1.0, score)),
+            "confidence": max(0.0, min(1.0, confidence)),
+            "dominant_state": dominant_state,
+            "dominant_activity": dominant_activity,
+            "track_ids": sorted(bucket["track_ids"]),
+            "frame_count": len(bucket["scores"]),
+        }
+
+        payload = self.member_payloads[member_id]
+        payload["records"].append(record)
+        payload["last_seen_timestamp_ms"] = record["end_timestamp_ms"]
+        payload["average_engagement_score"] = self._average_member_score(payload["records"])
+        self._write_member_file(member_id)
+
+    def _resolve_pending_track(
+        self,
+        track_id: int,
+        signature: Optional[np.ndarray],
+        bbox: Tuple[int, int, int, int],
+        timestamp_ms: int,
+        used_visible_members: set,
+    ) -> Optional[str]:
+        pending = self.pending_tracks.get(track_id)
+        if pending is None:
+            pending = {
+                "first_timestamp_ms": timestamp_ms,
+                "last_timestamp_ms": timestamp_ms,
+                "frames": 0,
+                "signatures": [],
+                "last_bbox": bbox,
+            }
+            self.pending_tracks[track_id] = pending
+
+        pending["frames"] += 1
+        pending["last_timestamp_ms"] = timestamp_ms
+        pending["last_bbox"] = bbox
+        if signature is not None:
+            pending["signatures"].append(signature)
+
+        if pending["frames"] < self.min_member_frames:
+            return None
+
+        averaged_signature = None
+        if pending["signatures"]:
+            averaged_signature = self._average_signatures(pending["signatures"])
+            member_id, _similarity = self._find_matching_member(
+                averaged_signature,
+                used_visible_members,
+            )
+            if member_id is not None:
+                self._add_member_feature(member_id, averaged_signature)
+                self.pending_tracks.pop(track_id, None)
+                return member_id
+
+        member_id = self._create_member()
+        if averaged_signature is not None:
+            self._add_member_feature(member_id, averaged_signature)
+        self.pending_tracks.pop(track_id, None)
+        return member_id
+
+    def _cleanup_pending_tracks(self, timestamp_ms: int) -> None:
+        max_pending_age_ms = int(max(self.bucket_seconds * 1000, 2000))
+        stale_track_ids = [
+            track_id
+            for track_id, pending in self.pending_tracks.items()
+            if timestamp_ms - pending["last_timestamp_ms"] > max_pending_age_ms
+        ]
+        for track_id in stale_track_ids:
+            self.pending_tracks.pop(track_id, None)
+
+    def _create_member(self) -> str:
+        member_id = f"member{self.next_member_index}"
+        self.next_member_index += 1
+        self.member_files[member_id] = self.output_dir / f"{member_id}.json"
+        self.member_payloads[member_id] = {
+            "session_id": self.session_id,
+            "member_id": member_id,
+            "created_at": datetime.now().isoformat(),
+            "average_engagement_score": None,
+            "last_seen_timestamp_ms": None,
+            "records": [],
+        }
+        self._write_member_file(member_id)
+        self._write_feature_registry()
+        return member_id
+
+    def _find_matching_member(
+        self,
+        signature: Optional[np.ndarray],
+        used_visible_members: set,
+    ) -> Tuple[Optional[str], float]:
+        if signature is None:
+            return None, -1.0
+
+        best_member_id = None
+        best_similarity = -1.0
+
+        candidate_member_ids = set(self.member_feature_prototypes) | set(self.member_signatures)
+        for member_id in candidate_member_ids:
+            if member_id in used_visible_members:
+                continue
+            similarity = self._best_feature_similarity(signature, member_id)
+            if similarity < self.recognition_threshold:
+                continue
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_member_id = member_id
+
+        return best_member_id, best_similarity
+
+    def _update_member_signature(self, member_id: str, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> None:
+        signature = self._face_signature(frame, bbox)
+        if signature is None:
+            return
+        if member_id not in self.member_signatures:
+            self._add_member_feature(member_id, signature)
+        else:
+            self._merge_signature(member_id, signature)
+
+    def _merge_signature(self, member_id: str, signature: Optional[np.ndarray]) -> None:
+        if signature is None:
+            return
+        self._add_member_feature(member_id, signature)
+
+    def _face_signature(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+        x, y, w, h = bbox
+        frame_h, frame_w = frame.shape[:2]
+        pad_x = int(w * 0.15)
+        pad_y = int(h * 0.15)
+        x1 = max(0, x - pad_x)
+        y1 = max(0, y - pad_y)
+        x2 = min(frame_w, x + w + pad_x)
+        y2 = min(frame_h, y + h + pad_y)
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+        resized = cv2.resize(gray, (16, 16), interpolation=cv2.INTER_AREA)
+        texture_source = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA)
+
+        appearance = resized.astype(np.float32).reshape(-1)
+        appearance -= float(appearance.mean())
+        appearance_norm = np.linalg.norm(appearance)
+        if appearance_norm > 0:
+            appearance = appearance / appearance_norm
+
+        texture = self._lbp_histogram(texture_source)
+        signature = np.concatenate([appearance * 0.65, texture * 0.35]).astype(np.float32)
+        norm = np.linalg.norm(signature)
+        if norm <= 0:
+            return None
+        return signature / norm
+
+    def _add_member_feature(self, member_id: str, signature: np.ndarray) -> None:
+        prototypes = self.member_feature_prototypes.setdefault(member_id, [])
+        if not prototypes:
+            prototypes.append(signature)
+        else:
+            similarities = [self._cosine_similarity(signature, prototype) for prototype in prototypes]
+            best_index = int(np.argmax(similarities))
+            if similarities[best_index] >= 0.95:
+                merged = 0.80 * prototypes[best_index] + 0.20 * signature
+                norm = np.linalg.norm(merged)
+                prototypes[best_index] = merged / norm if norm > 0 else signature
+            elif len(prototypes) < self.max_feature_prototypes:
+                prototypes.append(signature)
+            else:
+                prototypes[best_index] = signature
+
+        self.member_signatures[member_id] = self._average_signatures(prototypes)
+
+    def _best_feature_similarity(self, signature: np.ndarray, member_id: str) -> float:
+        prototypes = self.member_feature_prototypes.get(member_id, [])
+        if not prototypes and member_id in self.member_signatures:
+            prototypes = [self.member_signatures[member_id]]
+        if not prototypes:
+            return -1.0
+        return max(self._cosine_similarity(signature, prototype) for prototype in prototypes)
+
+    @staticmethod
+    def _lbp_histogram(gray: np.ndarray) -> np.ndarray:
+        center = gray[1:-1, 1:-1]
+        codes = np.zeros_like(center, dtype=np.uint8)
+        offsets = [
+            (-1, -1), (-1, 0), (-1, 1), (0, 1),
+            (1, 1), (1, 0), (1, -1), (0, -1),
+        ]
+        for bit, (dy, dx) in enumerate(offsets):
+            neighbor = gray[1 + dy: gray.shape[0] - 1 + dy, 1 + dx: gray.shape[1] - 1 + dx]
+            codes |= ((neighbor >= center).astype(np.uint8) << bit)
+
+        hist = cv2.calcHist([codes], [0], None, [32], [0, 256]).flatten().astype(np.float32)
+        total = float(hist.sum())
+        return hist / total if total > 0 else hist
+
+    def _remember_member_position(
+        self,
+        member_id: str,
+        bbox: Tuple[int, int, int, int],
+        timestamp_ms: int,
+    ) -> None:
+        self.member_last_bbox[member_id] = tuple(int(value) for value in bbox)
+        self.member_last_seen_ms[member_id] = int(timestamp_ms)
+
+    @staticmethod
+    def _average_signatures(signatures: List[np.ndarray]) -> np.ndarray:
+        average = np.mean(np.stack(signatures), axis=0)
+        norm = np.linalg.norm(average)
+        return average / norm if norm > 0 else signatures[-1]
+
+    @staticmethod
+    def _cosine_similarity(first: np.ndarray, second: np.ndarray) -> float:
+        return float(np.dot(first, second))
+
+    @staticmethod
+    def _new_bucket(bucket_index: int) -> Dict:
+        return {
+            "bucket_index": bucket_index,
+            "scores": [],
+            "confidences": [],
+            "states": defaultdict(int),
+            "activities": defaultdict(int),
+            "track_ids": set(),
+            "last_timestamp_ms": int(bucket_index),
+        }
+
+    @staticmethod
+    def _top_key(counts: Dict[str, int]) -> Optional[str]:
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda item: item[1])[0]
+
+    @staticmethod
+    def _average_member_score(records: List[Dict]) -> Optional[float]:
+        if not records:
+            return None
+        return sum(float(record["engagement_score"]) for record in records) / len(records)
+
+    def _write_member_file(self, member_id: str) -> None:
+        path = self.member_files[member_id]
+        with path.open("w", encoding="utf-8") as fh:
+            json.dump(self.member_payloads[member_id], fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+
+    def _write_feature_registry(self) -> None:
+        members = {}
+        for member_id, prototypes in self.member_feature_prototypes.items():
+            members[member_id] = {
+                "feature_version": "opencv_lbp_appearance_v1",
+                "similarity_threshold": float(self.recognition_threshold),
+                "prototype_count": len(prototypes),
+                "prototypes": [
+                    [round(float(value), 6) for value in prototype.tolist()]
+                    for prototype in prototypes
+                ],
+                "last_bbox": (
+                    [int(value) for value in self.member_last_bbox[member_id]]
+                    if member_id in self.member_last_bbox
+                    else None
+                ),
+                "last_seen_timestamp_ms": (
+                    int(self.member_last_seen_ms[member_id])
+                    if member_id in self.member_last_seen_ms
+                    else None
+                ),
+            }
+
+        payload = {
+            "session_id": self.session_id,
+            "feature_version": "opencv_lbp_appearance_v1",
+            "similarity_threshold": float(self.recognition_threshold),
+            "members": members,
+        }
+
+        with self.member_feature_file.open("w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+
+    def _frame_to_ms(self, frame_id: int) -> int:
+        return int((frame_id / self.fps) * 1000)
+
+
 class EngagementAnalyzer:
     """Main engagement analyzer combining face detection, YOLO, and rules-based scoring."""
 
@@ -565,16 +1138,33 @@ class EngagementAnalyzer:
 
 
 class EngagementLogger:
-    """Log engagement data to JSON."""
+    """Log detailed frame data and compact engagement summaries to JSON."""
 
-    def __init__(self, output_dir: Path = Path("engagement_logs")):
+    def __init__(
+        self,
+        output_dir: Path = Path("engagement_logs"),
+        log_details: bool = True,
+        log_summaries: bool = True,
+        summary_format: str = "production",
+    ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.output_file = self.output_dir / f"engagement_{self.session_id}.jsonl"
+        self.log_details = log_details
+        self.log_summaries = log_summaries
+        self.summary_format = summary_format
+        self.output_file = self.output_dir / f"engagement_{self.session_id}.jsonl" if log_details else None
+        self.summary_output_file = (
+            self.output_dir / f"engagement_summary_{self.session_id}.jsonl"
+            if log_summaries
+            else None
+        )
 
     def log_frame(self, frame_id: int, person_states: List[PersonState]) -> None:
         """Log a frame's engagement data."""
+        if not self.log_details or self.output_file is None:
+            return
+
         audience_data = []
         for ps in person_states:
             # Convert numpy types to Python types for JSON serialization
@@ -599,5 +1189,29 @@ class EngagementLogger:
         }
         
         with self.output_file.open("a", encoding="utf-8") as fh:
+            json.dump(record, fh, ensure_ascii=False)
+            fh.write("\n")
+
+    def log_summary(self, summary: EngagementBucketSummary) -> None:
+        """Log one compact engagement summary bucket."""
+        if not self.log_summaries or self.summary_output_file is None:
+            return
+
+        if self.summary_format == "debug":
+            record = {
+                "timestamp_ms": int(summary.timestamp_ms),
+                "engagement_score": float(summary.engagement_score),
+                "audience_count": int(summary.audience_count),
+                "confidence": float(summary.confidence),
+                "change": float(summary.change),
+                "dominant_signals": list(summary.dominant_signals),
+            }
+        else:
+            record = {
+                "timestamp_ms": int(summary.timestamp_ms),
+                "engagement_score": float(summary.engagement_score),
+            }
+
+        with self.summary_output_file.open("a", encoding="utf-8") as fh:
             json.dump(record, fh, ensure_ascii=False)
             fh.write("\n")

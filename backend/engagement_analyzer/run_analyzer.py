@@ -6,7 +6,12 @@ import cv2
 import sys
 import logging
 from pathlib import Path
-from engagement_analyzer import EngagementAnalyzer, EngagementLogger
+from engagement_analyzer import (
+    AudienceMemberEngagementTracker,
+    EngagementAggregator,
+    EngagementAnalyzer,
+    EngagementLogger,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -48,8 +53,57 @@ def main():
         default=30,
         help="Target FPS (default: 30)"
     )
+    parser.add_argument(
+        "--bucket-seconds",
+        type=float,
+        default=5.0,
+        help="Engagement summary bucket size in seconds (default: 5)"
+    )
+    parser.add_argument(
+        "--log-mode",
+        choices=("summary", "detail", "both"),
+        default="summary",
+        help="Which logs to write: compact summaries, detailed per-person frames, or both (default: summary)"
+    )
+    parser.add_argument(
+        "--summary-format",
+        choices=("production", "debug"),
+        default="production",
+        help="Summary JSON format: production emits only timestamp and score; debug includes diagnostics"
+    )
+    parser.add_argument(
+        "--disable-member-tracking",
+        action="store_true",
+        help="Disable per-audience-member engagement files"
+    )
+    parser.add_argument(
+        "--member-recognition-threshold",
+        type=float,
+        default=0.55,
+        help="Face feature similarity threshold for matching returning members (default: 0.80)"
+    )
+    parser.add_argument(
+        "--min-member-frames",
+        type=int,
+        default=10,
+        help="Visible frames required before creating a new member file (default: 10)"
+    )
+    parser.add_argument(
+        "--max-member-feature-prototypes",
+        type=int,
+        default=5,
+        help="Maximum face-feature prototypes stored per member (default: 5)"
+    )
     
     args = parser.parse_args()
+    if args.bucket_seconds <= 0:
+        parser.error("--bucket-seconds must be greater than 0")
+    if not 0.0 <= args.member_recognition_threshold <= 1.0:
+        parser.error("--member-recognition-threshold must be between 0.0 and 1.0")
+    if args.min_member_frames <= 0:
+        parser.error("--min-member-frames must be greater than 0")
+    if args.max_member_feature_prototypes <= 0:
+        parser.error("--max-member-feature-prototypes must be greater than 0")
     
     # Open video
     video_source = 0 if args.video == "0" else args.video
@@ -71,9 +125,31 @@ def main():
     
     # Initialize analyzer and logger
     analyzer = EngagementAnalyzer(yolo_model=args.yolo_model)
-    logger_obj = EngagementLogger(Path(args.output))
+    aggregator = EngagementAggregator(fps=fps, bucket_seconds=args.bucket_seconds)
+    logger_obj = EngagementLogger(
+        Path(args.output),
+        log_details=args.log_mode in ("detail", "both"),
+        log_summaries=args.log_mode in ("summary", "both"),
+        summary_format=args.summary_format,
+    )
+    member_tracker = None
+    if not args.disable_member_tracking:
+        member_tracker = AudienceMemberEngagementTracker(
+            Path(args.output),
+            session_id=logger_obj.session_id,
+            fps=fps,
+            bucket_seconds=args.bucket_seconds,
+            recognition_threshold=args.member_recognition_threshold,
+            min_member_frames=args.min_member_frames,
+            max_feature_prototypes=args.max_member_feature_prototypes,
+        )
     
-    logger.info(f"Engagement logs will be saved to: {logger_obj.output_file}")
+    if logger_obj.output_file is not None:
+        logger.info(f"Detailed engagement logs will be saved to: {logger_obj.output_file}")
+    if logger_obj.summary_output_file is not None:
+        logger.info(f"Summary engagement logs will be saved to: {logger_obj.summary_output_file}")
+    if member_tracker is not None:
+        logger.info(f"Per-member engagement logs will be saved to: {member_tracker.output_dir}")
     logger.info("Press 'q' to quit")
     
     frame_count = 0
@@ -90,6 +166,11 @@ def main():
             
             # Log results
             logger_obj.log_frame(frame_count, person_states)
+            summary = aggregator.add_frame(frame_count, person_states)
+            if summary is not None:
+                logger_obj.log_summary(summary)
+            if member_tracker is not None:
+                member_tracker.add_frame(frame_count, frame, person_states)
             
             # Draw overlays if requested
             if args.draw or args.display:
@@ -111,11 +192,21 @@ def main():
         logger.info("Interrupted by user")
     
     finally:
+        summary = aggregator.flush()
+        if summary is not None:
+            logger_obj.log_summary(summary)
+        if member_tracker is not None:
+            member_tracker.flush()
         cap.release()
         cv2.destroyAllWindows()
     
     logger.info(f"Processing complete. Total frames: {frame_count}")
-    logger.info(f"Logs saved to: {logger_obj.output_file}")
+    if logger_obj.output_file is not None:
+        logger.info(f"Detailed logs saved to: {logger_obj.output_file}")
+    if logger_obj.summary_output_file is not None:
+        logger.info(f"Summary logs saved to: {logger_obj.summary_output_file}")
+    if member_tracker is not None:
+        logger.info(f"Per-member logs saved to: {member_tracker.output_dir}")
     
     return 0
 
