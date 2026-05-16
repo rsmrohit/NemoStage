@@ -40,8 +40,8 @@ CHROMA_ROOT = "/home/asus/nemostage-chroma"
 BREV_OLLAMA_URL = "http://127.0.0.1:11436"
 BREV_OLLAMA_MODEL = "gemma4:26b"
 
-# Port 11437 = SSH tunnel → Brev 2x L40S (204.52.26.237), brev-tunnel.service
-# Benchmark: nemotron-3-nano:4b = 100% accuracy @ 2.0s avg; qwen3.6:35b for high-quality generation
+# Port 11437 = SSH tunnel → Brev L40S (environmental-yellow-lizard), brev-tunnel.service
+# nemotron-3-nano:4b for both classify and generate — confirmed available, 100% accuracy
 _BREV = "http://127.0.0.1:11437"
 CLASSIFY_POOL = [
     (_BREV, "nemotron-3-nano:4b"),
@@ -50,11 +50,16 @@ CLASSIFY_POOL = [
     (_BREV, "nemotron-3-nano:4b"),
 ]
 GENERATE_POOL = [
-    (_BREV, "qwen3:8b"),
-    (_BREV, "qwen3:8b"),
-    (_BREV, "qwen3:8b"),
-    (_BREV, "qwen3:8b"),
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
+    (_BREV, "nemotron-3-nano:4b"),
 ]
+
+# Image generation — set to a running FLUX/diffusers endpoint to enable
+# POST IMAGE_GEN_URL with {"prompt": str, "width": int, "height": int, "steps": int}
+# expects {"image_base64": str, "format": "png"}
+IMAGE_GEN_URL = ""
 # Kept for any legacy callers
 CLASSIFY_OLLAMA_URL, CLASSIFY_OLLAMA_MODEL = CLASSIFY_POOL[0]
 GENERATE_OLLAMA_URL, GENERATE_OLLAMA_MODEL = GENERATE_POOL[-1]
@@ -1213,6 +1218,34 @@ async def ask_agent_async(
     return await loop.run_in_executor(None, ask_agent, prompt, agent, timeout, session_id)
 
 
+async def generate_image_for_slide(topic: str, title: str, bg_color: str = "#1a1a2e") -> str | None:
+    """Call IMAGE_GEN_URL to get a base64 PNG for the slide. Returns None if disabled or failed."""
+    if not IMAGE_GEN_URL:
+        return None
+    prompt = (
+        f"{title}. Educational diagram about {topic}. "
+        "Clean vector style, minimal background, professional presentation graphic."
+    )
+    payload = json.dumps({"prompt": prompt, "width": 768, "height": 512, "steps": 4}).encode()
+    req = urllib.request.Request(
+        IMAGE_GEN_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    loop = asyncio.get_event_loop()
+    try:
+        def _call():
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read())
+        result = await loop.run_in_executor(None, _call)
+        b64 = result.get("image_base64") or result.get("image")
+        fmt = result.get("format", "png")
+        return f"data:image/{fmt};base64,{b64}" if b64 else None
+    except Exception:
+        return None
+
+
 async def generate_slide_background(
     presentation_id: str, topic: str, after_slide: int, session: "PresentationSession",
     transcript: str = "",
@@ -1322,15 +1355,18 @@ async def generate_slide_background(
             "accent": style_spec.get("accent_color", "#4f8ef7"),
             "font": style_spec.get("font_family", "Calibri"),
         }
+        slide_title = parsed.get("title", topic)
+        image_url = await generate_image_for_slide(topic, slide_title, style_hint["bg"])
         entry = {
             "index": len(generated_slides.get(presentation_id, [])),
-            "title": parsed.get("title", topic),
+            "title": slide_title,
             "bullets": parsed.get("bullets", []),
             "template_id": selected_template.get("id") if selected_template else None,
             "template": selected_template,
             "text_boxes": text_boxes,
             "notes": parsed.get("notes", ""),
             "style_hint": style_hint,
+            "image_url": image_url,
             "after_slide": insertion_slide,
             "topic": topic,
             "created_at": time.time(),
