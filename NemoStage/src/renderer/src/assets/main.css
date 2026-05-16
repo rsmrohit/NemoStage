@@ -78,6 +78,8 @@ body {
 }
 
 .primary {
+  width: 100%;
+  margin-top: 10px;
   border: none;
   background: var(--primary);
   color: #ffffff;
