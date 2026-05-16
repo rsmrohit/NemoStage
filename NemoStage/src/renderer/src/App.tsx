@@ -5,9 +5,13 @@ import { NavigationControls } from './components/NavigationControls'
 import { SlideCanvas } from './components/SlideCanvas'
 import { SlideGallery } from './components/SlideGallery'
 import { AudienceQrSlide } from './components/AudienceQrSlide'
+import { GeneratedSlideCard } from './components/GeneratedSlideCard'
+import { QAOverlay } from './components/QAOverlay'
 import {
   NEMOSTAGE_AUDIENCE_URL,
   deleteSandboxPresentation,
+  getGeneratedSlides,
+  getRecentQA,
   listSandboxPresentations,
   sendPresentationTranscript,
   startPresentation,
@@ -16,7 +20,7 @@ import {
 } from './services/nemostageApi'
 import type { VectorizationFields } from './services/nemostageApi'
 import { usePresentationStore } from './store/presentationStore'
-import type { ExtractionPhase, SessionMetadata, SlideData } from './types/presentation'
+import type { ExtractionPhase, GeneratedSlide, QAEntry, SessionMetadata, SlideData } from './types/presentation'
 
 type AppMode = 'select' | 'gallery' | 'live'
 type LiveAgentStatus =
@@ -106,17 +110,60 @@ function AppContent(): React.JSX.Element {
   const BATCH_INTERVAL_MS = 20000 // 20 seconds
   const presentationIdRef = useRef<string | null>(null)
   const processedTranscriptEventRef = useRef<string | null>(null)
+  const [injectedSlides, setInjectedSlides] = useState<GeneratedSlide[]>([])
+  const slideGenPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [activeQA, setActiveQA] = useState<QAEntry | null>(null)
+  const qaLastPollTsRef = useRef<number>(0)
+  const qaPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const currentSlideImage = slides[currentSlide]?.imagePaths[0] ?? null
-  const liveTotalSlides = totalSlides > 0 ? totalSlides + 1 : 0
-  const isAudienceQrSlide = mode === 'live' && liveSlideIndex === 0
-  const liveDeckSlideIndex = Math.max(liveSlideIndex - 1, 0)
-  const liveSlideImage = isAudienceQrSlide ? null : (slides[liveDeckSlideIndex]?.imagePaths[0] ?? null)
-  const liveSlideData = isAudienceQrSlide ? null : (slideData[liveDeckSlideIndex] ?? null)
+
+  // Build the merged live slide sequence: [QR(0), deck slide 1, ...injected after N..., deck slide 2, ...]
+  const liveMergedSlides = useMemo(() => {
+    type LiveSlot = { type: 'qr' } | { type: 'deck'; deckIndex: number } | { type: 'generated'; slide: GeneratedSlide }
+    const slots: LiveSlot[] = [{ type: 'qr' }]
+    for (let i = 0; i < totalSlides; i++) {
+      slots.push({ type: 'deck', deckIndex: i })
+      const injected = injectedSlides.filter((s) => s.after_slide === i)
+      for (const s of injected) slots.push({ type: 'generated', slide: s })
+    }
+    return slots
+  }, [totalSlides, injectedSlides])
+
+  const liveTotalSlides = liveMergedSlides.length
+  const currentLiveSlot = liveMergedSlides[liveSlideIndex] ?? { type: 'qr' }
+  const isAudienceQrSlide = currentLiveSlot.type === 'qr'
+  const isGeneratedSlide = currentLiveSlot.type === 'generated'
+  const currentGeneratedSlide = isGeneratedSlide ? (currentLiveSlot as { type: 'generated'; slide: GeneratedSlide }).slide : null
+  const liveDeckSlideIndex = currentLiveSlot.type === 'deck' ? (currentLiveSlot as { type: 'deck'; deckIndex: number }).deckIndex : 0
+  const liveSlideImage = (isAudienceQrSlide || isGeneratedSlide) ? null : (slides[liveDeckSlideIndex]?.imagePaths[0] ?? null)
+  const liveSlideData = (isAudienceQrSlide || isGeneratedSlide) ? null : (slideData[liveDeckSlideIndex] ?? null)
 
   useEffect(() => {
     presentationIdRef.current = presentationId
   }, [presentationId])
+
+  // Q&A polling — active only in live mode; also cleans up slide-gen poll on mode exit
+  useEffect(() => {
+    if (mode !== 'live') {
+      if (qaPollRef.current) clearInterval(qaPollRef.current)
+      if (slideGenPollRef.current) clearInterval(slideGenPollRef.current)
+      return
+    }
+    qaPollRef.current = setInterval(async () => {
+      try {
+        const { qa } = await getRecentQA(qaLastPollTsRef.current)
+        if (qa.length > 0) {
+          const latest = qa[qa.length - 1]
+          setActiveQA(latest)
+          qaLastPollTsRef.current = latest.ts
+        }
+      } catch {
+        // silently ignore poll failures
+      }
+    }, 4000)
+    return () => { if (qaPollRef.current) clearInterval(qaPollRef.current) }
+  }, [mode])
 
   const loadRecentSessions = async (): Promise<void> => {
     try {
@@ -343,9 +390,27 @@ function AppContent(): React.JSX.Element {
           const agentSummary = result.agent_result.summary_so_far ?? ''
           const missingTopic = result.agent_result.topic ?? result.agent_result.off_slide_topic
           const matchedSlide = result.agent_result.matched_slide
+          const generationQueued = (result as unknown as Record<string, unknown>).generation_queued === true
 
           setSlideGenerationNeeded(result.slide_generation_needed)
-          if (result.coverage_status === 'not_covered') {
+
+          if (generationQueued) {
+            setLiveAgentStatus('slide-generation-needed')
+            setLiveAgentMessage(`Generating slide for: ${missingTopic ?? 'off-slide topic'}…`)
+            // Poll for the generated slide
+            if (slideGenPollRef.current) clearInterval(slideGenPollRef.current)
+            slideGenPollRef.current = setInterval(async () => {
+              try {
+                const { slides: gen } = await getGeneratedSlides(activePresentationId)
+                if (gen.length > 0) {
+                  setInjectedSlides(gen)
+                  if (slideGenPollRef.current) clearInterval(slideGenPollRef.current)
+                  setLiveAgentStatus('on-slide')
+                  setLiveAgentMessage(`New slide ready: ${gen[gen.length - 1].title}`)
+                }
+              } catch { /* ignore */ }
+            }, 5000)
+          } else if (result.coverage_status === 'not_covered') {
             setLiveAgentStatus('slide-generation-needed')
             setLiveAgentMessage(`Slide generation needed${missingTopic ? `: ${missingTopic}` : ''}`)
           } else if (result.coverage_status === 'other_slide') {
@@ -740,29 +805,53 @@ function AppContent(): React.JSX.Element {
               {sidebarOpen && (
                 <>
                   <aside className="thumbnail-sidebar">
-                  <button
-                    type="button"
-                    className={`thumb-mini audience-thumb ${liveSlideIndex === 0 ? 'active' : ''}`}
-                    onClick={() => goToLiveSlide(0)}
-                  >
-                    <div className="audience-thumb-preview">QR</div>
-                    <span>1</span>
-                  </button>
-                    {slides.map((slide, index) => (
-                      <button
-                        key={slide.slideIndex}
-                        type="button"
-                        className={`thumb-mini ${index + 1 === liveSlideIndex ? 'active' : ''}`}
-                        onClick={() => goToLiveSlide(index + 1)}
-                      >
-                        {slide.thumbnailPath ? (
-                          <img src={slide.thumbnailPath} alt={`Slide ${index + 2}`} />
-                        ) : (
-                          <span>No preview</span>
-                        )}
-                        <span>{index + 2}</span>
-                      </button>
-                    ))}
+                    {liveMergedSlides.map((slot, index) => {
+                      if (slot.type === 'qr') {
+                        return (
+                          <button
+                            key="qr"
+                            type="button"
+                            className={`thumb-mini audience-thumb ${index === liveSlideIndex ? 'active' : ''}`}
+                            onClick={() => goToLiveSlide(index)}
+                          >
+                            <div className="audience-thumb-preview">QR</div>
+                            <span>{index + 1}</span>
+                          </button>
+                        )
+                      }
+                      if (slot.type === 'generated') {
+                        const bg = slot.slide.style_hint?.bg || '#1a1a2e'
+                        const accent = slot.slide.style_hint?.accent || '#4f8ef7'
+                        return (
+                          <button
+                            key={`gen-${slot.slide.after_slide}-${slot.slide.created_at}`}
+                            type="button"
+                            className={`thumb-mini ${index === liveSlideIndex ? 'active' : ''}`}
+                            style={{ border: `2px solid ${accent}` }}
+                            onClick={() => goToLiveSlide(index)}
+                          >
+                            <div style={{ width: '100%', height: '100%', background: bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: accent, fontWeight: 700 }}>AI</div>
+                            <span>{index + 1}</span>
+                          </button>
+                        )
+                      }
+                      const deckSlide = slides[slot.deckIndex]
+                      return (
+                        <button
+                          key={`deck-${slot.deckIndex}`}
+                          type="button"
+                          className={`thumb-mini ${index === liveSlideIndex ? 'active' : ''}`}
+                          onClick={() => goToLiveSlide(index)}
+                        >
+                          {deckSlide?.thumbnailPath ? (
+                            <img src={deckSlide.thumbnailPath} alt={`Slide ${index + 1}`} />
+                          ) : (
+                            <span>No preview</span>
+                          )}
+                          <span>{index + 1}</span>
+                        </button>
+                      )
+                    })}
                   </aside>
                   <div
                     className="sidebar-resizer"
@@ -778,6 +867,8 @@ function AppContent(): React.JSX.Element {
                 <div ref={slideContainerRef} className="slide-fullscreen-wrapper">
                   {isAudienceQrSlide ? (
                     <AudienceQrSlide audienceUrl={NEMOSTAGE_AUDIENCE_URL} />
+                  ) : isGeneratedSlide && currentGeneratedSlide ? (
+                    <GeneratedSlideCard slide={currentGeneratedSlide} />
                   ) : (
                     <SlideCanvas
                       currentSlide={liveDeckSlideIndex}
@@ -798,6 +889,8 @@ function AppContent(): React.JSX.Element {
                   className="sidebar-resizer"
                   onMouseDown={(e) => startResize(e, agentPanelWidth, setAgentPanelWidth, 180, 480, true)}
                 />
+
+                <QAOverlay entry={activeQA} onDismiss={() => setActiveQA(null)} />
 
                 <aside className="live-agent-panel" aria-label="Live transcript agent">
                   <div className="live-agent-header">

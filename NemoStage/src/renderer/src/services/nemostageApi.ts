@@ -1,4 +1,4 @@
-import type { SlideData } from '../types/presentation'
+import type { SlideData, GeneratedSlide, QAEntry } from '../types/presentation'
 
 export const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
 export const NEMOSTAGE_AUDIENCE_URL = `${NEMOSTAGE_BACKEND_URL}/audience`
@@ -145,6 +145,14 @@ export function deleteSandboxPresentation(filename: string): Promise<{
   sandbox_path: string
 }> {
   return deleteJson(`/presentations/${encodeURIComponent(filename)}`)
+}
+
+export function getGeneratedSlides(presentationId: string): Promise<{ slides: GeneratedSlide[] }> {
+  return getJson(`/presentation/${encodeURIComponent(presentationId)}/generated-slides`)
+}
+
+export function getRecentQA(after: number): Promise<{ qa: QAEntry[] }> {
+  return getJson(`/audience/qa/recent?after=${after}`)
 }
 
 export function summarizeSlideData(slideIndex: number, data: SlideData | null): PresentationSlidePayload {
