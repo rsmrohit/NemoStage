@@ -1014,6 +1014,145 @@ def presentation_status(session: PresentationSession) -> dict:
     return data
 
 
+def transcript_noop_response(session: PresentationSession, presentation_id: str) -> JSONResponse:
+    return JSONResponse({
+        "status": "ok",
+        "presentation_id": presentation_id,
+        "current_slide": session.current_slide,
+        "agent_result": {"reason": "empty transcript ignored"},
+        "coverage_status": "unknown",
+        "slide_generation_needed": False,
+        "noop": True,
+    })
+
+
+def transcript_vector_unavailable_response(
+    session: PresentationSession,
+    presentation_id: str,
+    vector_search: dict,
+    reason: str | None = None,
+) -> JSONResponse:
+    return JSONResponse({
+        "status": "ok",
+        "presentation_id": presentation_id,
+        "current_slide": session.current_slide,
+        "agent_result": {"vector_error": reason or vector_search.get("error", "Vector search unavailable")},
+        "coverage_status": "unknown",
+        "slide_generation_needed": False,
+        "vector_search": vector_search,
+        "backend": "brev",
+    })
+
+
+async def analyze_transcript_with_brev(
+    payload: PresentationTranscriptRequest,
+    queue_generation: bool = True,
+) -> JSONResponse:
+    session = get_presentation_session(payload.presentation_id)
+    transcript = payload.transcript.strip()
+    if not transcript:
+        return transcript_noop_response(session, payload.presentation_id)
+
+    vector_search = query_deck_vectors(session, transcript)
+    if vector_search.get("status") != "ready":
+        session.last_agent_result = {"vector_error": vector_search.get("error", "Vector search unavailable")}
+        session.slide_generation_needed = False
+        session.coverage_status = "unknown"
+        session.updated_at = time.time()
+        presentation_sessions[payload.presentation_id] = session
+        return transcript_vector_unavailable_response(session, payload.presentation_id, vector_search)
+
+    if not vector_search.get("matches"):
+        session.last_agent_result = {"vector_error": "No vector matches returned for transcript"}
+        session.slide_generation_needed = False
+        session.coverage_status = "unknown"
+        session.updated_at = time.time()
+        presentation_sessions[payload.presentation_id] = session
+        return transcript_vector_unavailable_response(
+            session,
+            payload.presentation_id,
+            vector_search,
+            "No vector matches returned for transcript",
+        )
+
+    vector_context = format_vector_matches_for_agent(vector_search, session.current_slide)
+    prompt = (
+        "You are tracking a live presentation. Use only the vector-retrieved slide context below; "
+        "do not open files, run tools, or assume content from slides that were not retrieved. "
+        "Classify the speaker's transcript chunk into exactly one coverage_status:\n"
+        "- current_slide: the content is covered by the current slide.\n"
+        "- other_slide: the content is not covered by the current slide, but is covered by one "
+        "of the retrieved slides from this same presentation, including a future slide.\n"
+        "- not_covered: the content is not covered by the retrieved slide context, or the only "
+        "matches are weak and do not actually support the transcript topic.\n\n"
+        "If coverage_status is other_slide, set matched_slide to the best matching slide_index. "
+        "If not_covered, set matched_slide to null and topic to the missing topic.\n\n"
+        f"Current slide_index: {session.current_slide}\n"
+        f"Vector search threshold: distance <= {VECTOR_RELEVANCE_DISTANCE_THRESHOLD} is strong; higher is weak.\n\n"
+        f"Vector-retrieved slide context:\n{vector_context}\n\n"
+        f"Transcript chunk:\n{transcript}\n\n"
+        "Return exactly one JSON object and nothing else. Schema:\n"
+        '{"coverage_status": "current_slide|other_slide|not_covered", '
+        '"matched_slide": <int|null>, "summary_so_far": "<str>", '
+        '"topic": "<str|null>", "reason": "<str>"}\n'
+    )
+
+    reply = await ask_brev_ollama(prompt)
+    parsed = parse_json_reply(reply)
+    agent_result = parsed if isinstance(parsed, dict) else {"raw": reply}
+
+    coverage_status = "unknown"
+    if isinstance(agent_result, dict):
+        raw_status = agent_result.get("coverage_status")
+        if raw_status in {"current_slide", "other_slide", "not_covered"}:
+            coverage_status = raw_status
+        elif agent_result.get("off_slide") is True:
+            coverage_status = "not_covered"
+        elif agent_result.get("off_slide") is False:
+            coverage_status = "current_slide"
+
+    slide_generation_needed = coverage_status == "not_covered"
+    generation_queued = False
+    if queue_generation and slide_generation_needed and session.deck_id:
+        topic = (agent_result.get("topic") or "unknown topic") if isinstance(agent_result, dict) else "unknown topic"
+        asyncio.create_task(generate_slide_background(payload.presentation_id, topic, session.current_slide, session))
+        generation_queued = True
+        slide_generation_needed = False
+
+    session.last_agent_result = agent_result
+    session.slide_generation_needed = slide_generation_needed
+    session.coverage_status = coverage_status
+    session.updated_at = time.time()
+    presentation_sessions[payload.presentation_id] = session
+
+    return JSONResponse({
+        "status": "ok",
+        "presentation_id": payload.presentation_id,
+        "current_slide": session.current_slide,
+        "agent_result": agent_result,
+        "coverage_status": coverage_status,
+        "slide_generation_needed": slide_generation_needed,
+        "generation_queued": generation_queued,
+        "backend": "brev",
+        "backend_model": BREV_OLLAMA_MODEL,
+        "vector_search": {
+            "status": vector_search.get("status"),
+            "collection_name": vector_search.get("collection_name"),
+            "deck_id": vector_search.get("deck_id"),
+            "best_distance": vector_search.get("best_distance"),
+            "threshold": vector_search.get("threshold"),
+            "matches": [
+                {
+                    "metadata": match.get("metadata", {}),
+                    "distance": match.get("distance"),
+                    "strong_match": match.get("strong_match"),
+                }
+                for match in vector_search.get("matches", [])
+            ],
+        },
+    })
+
+
 @app.post("/presentation/start")
 async def start_presentation(payload: PresentationStartRequest):
     session_id = payload.session_id.strip()
@@ -1079,208 +1218,13 @@ async def update_presentation_slide(payload: PresentationSlideRequest):
 
 @app.post("/presentation/transcript")
 async def analyze_presentation_transcript(payload: PresentationTranscriptRequest):
-    session = get_presentation_session(payload.presentation_id)
-    transcript = payload.transcript.strip()
-    if not transcript:
-        raise HTTPException(status_code=400, detail="empty transcript")
-
-    vector_search = query_deck_vectors(session, transcript)
-    if vector_search.get("status") != "ready":
-        session.last_agent_result = {"vector_error": vector_search.get("error", "Vector search unavailable")}
-        session.slide_generation_needed = False
-        session.coverage_status = "unknown"
-        session.updated_at = time.time()
-        presentation_sessions[payload.presentation_id] = session
-        return JSONResponse({
-            "status": "ok",
-            "presentation_id": payload.presentation_id,
-            "current_slide": session.current_slide,
-            "agent_result": session.last_agent_result,
-            "coverage_status": "unknown",
-            "slide_generation_needed": False,
-            "vector_search": vector_search,
-        })
-
-    if not vector_search.get("matches"):
-        session.last_agent_result = {"vector_error": "No vector matches returned for transcript"}
-        session.slide_generation_needed = False
-        session.coverage_status = "unknown"
-        session.updated_at = time.time()
-        presentation_sessions[payload.presentation_id] = session
-        return JSONResponse({
-            "status": "ok",
-            "presentation_id": payload.presentation_id,
-            "current_slide": session.current_slide,
-            "agent_result": session.last_agent_result,
-            "coverage_status": "unknown",
-            "slide_generation_needed": False,
-            "vector_search": vector_search,
-        })
-
-    vector_context = format_vector_matches_for_agent(vector_search, session.current_slide)
-    prompt = (
-        "You are tracking a live presentation. Use only the vector-retrieved slide context below; "
-        "do not open files, run tools, or assume content from slides that were not retrieved. "
-        "Classify the speaker's transcript chunk into exactly "
-        "one coverage_status:\n"
-        "- current_slide: the content is covered by the current slide.\n"
-        "- other_slide: the content is not covered by the current slide, but is covered by one "
-        "of the retrieved slides from this same presentation, including a future slide.\n"
-        "- not_covered: the content is not covered by the retrieved slide context, or the only "
-        "matches are weak and do not actually support the transcript topic.\n\n"
-        "If coverage_status is other_slide, set matched_slide to the best matching slide_index. "
-        "If not_covered, set matched_slide to null and topic to the missing topic.\n\n"
-        f"Current slide_index: {session.current_slide}\n"
-        f"Vector search threshold: distance <= {VECTOR_RELEVANCE_DISTANCE_THRESHOLD} is strong; higher is weak.\n\n"
-        f"Vector-retrieved slide context:\n{vector_context}\n\n"
-        f"Transcript chunk:\n{transcript}\n\n"
-        "Return exactly one JSON object and nothing else. Schema:\n"
-        '{"coverage_status": "current_slide|other_slide|not_covered", '
-        '"matched_slide": <int|null>, "summary_so_far": "<str>", '
-        '"topic": "<str|null>", "reason": "<str>"}\n'
-    )
-    reply = ask_agent(
-        prompt,
-        agent="livetranscript",
-        session_id=f"presentation-{payload.presentation_id}",
-    )
-    parsed = parse_json_reply(reply)
-    agent_result = parsed if isinstance(parsed, dict) else {"raw": reply}
-    coverage_status = "unknown"
-    if isinstance(agent_result, dict):
-        raw_status = agent_result.get("coverage_status")
-        if raw_status in {"current_slide", "other_slide", "not_covered"}:
-            coverage_status = raw_status
-        elif agent_result.get("off_slide") is True:
-            coverage_status = "not_covered"
-        elif agent_result.get("off_slide") is False:
-            coverage_status = "current_slide"
-    slide_generation_needed = coverage_status == "not_covered"
-
-    session.last_agent_result = agent_result
-    session.slide_generation_needed = slide_generation_needed
-    session.coverage_status = coverage_status
-    session.updated_at = time.time()
-    presentation_sessions[payload.presentation_id] = session
-
-    return JSONResponse({
-        "status": "ok",
-        "presentation_id": payload.presentation_id,
-        "current_slide": session.current_slide,
-        "agent_result": agent_result,
-        "coverage_status": coverage_status,
-        "slide_generation_needed": slide_generation_needed,
-        "vector_search": {
-            "status": vector_search.get("status"),
-            "collection_name": vector_search.get("collection_name"),
-            "deck_id": vector_search.get("deck_id"),
-            "best_distance": vector_search.get("best_distance"),
-            "threshold": vector_search.get("threshold"),
-            "matches": [
-                {
-                    "metadata": match.get("metadata", {}),
-                    "distance": match.get("distance"),
-                    "strong_match": match.get("strong_match"),
-                }
-                for match in vector_search.get("matches", [])
-            ],
-        },
-    })
+    return await analyze_transcript_with_brev(payload)
 
 
 @app.post("/brev/transcript")
 async def brev_transcript(payload: PresentationTranscriptRequest):
-    """Same vector search as /presentation/transcript but inference runs on Brev Ollama directly."""
-    session = get_presentation_session(payload.presentation_id)
-    transcript = payload.transcript.strip()
-    if not transcript:
-        raise HTTPException(status_code=400, detail="empty transcript")
-
-    vector_search = query_deck_vectors(session, transcript)
-    if vector_search.get("status") != "ready" or not vector_search.get("matches"):
-        return JSONResponse({
-            "status": "ok",
-            "presentation_id": payload.presentation_id,
-            "current_slide": session.current_slide,
-            "agent_result": {"vector_error": vector_search.get("error", "Vector search unavailable")},
-            "coverage_status": "unknown",
-            "slide_generation_needed": False,
-            "vector_search": vector_search,
-            "backend": "brev",
-        })
-
-    vector_context = format_vector_matches_for_agent(vector_search, session.current_slide)
-    prompt = (
-        "You are tracking a live presentation. Use only the vector-retrieved slide context below; "
-        "do not open files, run tools, or assume content from slides that were not retrieved. "
-        "Classify the speaker's transcript chunk into exactly one coverage_status:\n"
-        "- current_slide: the content is covered by the current slide.\n"
-        "- other_slide: the content is not covered by the current slide, but is covered by one "
-        "of the retrieved slides from this same presentation, including a future slide.\n"
-        "- not_covered: the content is not covered by the retrieved slide context, or the only "
-        "matches are weak and do not actually support the transcript topic.\n\n"
-        "If coverage_status is other_slide, set matched_slide to the best matching slide_index. "
-        "If not_covered, set matched_slide to null and topic to the missing topic.\n\n"
-        f"Current slide_index: {session.current_slide}\n"
-        f"Vector search threshold: distance <= {VECTOR_RELEVANCE_DISTANCE_THRESHOLD} is strong; higher is weak.\n\n"
-        f"Vector-retrieved slide context:\n{vector_context}\n\n"
-        f"Transcript chunk:\n{transcript}\n\n"
-        "Return exactly one JSON object and nothing else. Schema:\n"
-        '{"coverage_status": "current_slide|other_slide|not_covered", '
-        '"matched_slide": <int|null>, "summary_so_far": "<str>", '
-        '"topic": "<str|null>", "reason": "<str>"}\n'
-    )
-
-    reply = await ask_brev_ollama(prompt)
-    parsed = parse_json_reply(reply)
-    agent_result = parsed if isinstance(parsed, dict) else {"raw": reply}
-
-    coverage_status = "unknown"
-    if isinstance(agent_result, dict):
-        raw_status = agent_result.get("coverage_status")
-        if raw_status in {"current_slide", "other_slide", "not_covered"}:
-            coverage_status = raw_status
-    slide_generation_needed = coverage_status == "not_covered"
-
-    generation_queued = False
-    if slide_generation_needed and session.deck_id:
-        topic = (agent_result.get("topic") or "unknown topic") if isinstance(agent_result, dict) else "unknown topic"
-        asyncio.create_task(generate_slide_background(payload.presentation_id, topic, session.current_slide, session))
-        generation_queued = True
-        slide_generation_needed = False
-
-    session.last_agent_result = agent_result
-    session.slide_generation_needed = slide_generation_needed
-    session.coverage_status = coverage_status
-    session.updated_at = time.time()
-    presentation_sessions[payload.presentation_id] = session
-
-    return JSONResponse({
-        "status": "ok",
-        "presentation_id": payload.presentation_id,
-        "current_slide": session.current_slide,
-        "agent_result": agent_result,
-        "coverage_status": coverage_status,
-        "slide_generation_needed": slide_generation_needed,
-        "generation_queued": generation_queued,
-        "backend": "brev",
-        "backend_model": BREV_OLLAMA_MODEL,
-        "vector_search": {
-            "status": vector_search.get("status"),
-            "collection_name": vector_search.get("collection_name"),
-            "deck_id": vector_search.get("deck_id"),
-            "best_distance": vector_search.get("best_distance"),
-            "threshold": vector_search.get("threshold"),
-            "matches": [
-                {
-                    "metadata": match.get("metadata", {}),
-                    "distance": match.get("distance"),
-                    "strong_match": match.get("strong_match"),
-                }
-                for match in vector_search.get("matches", [])
-            ],
-        },
-    })
+    """Compatibility alias for the Brev-backed live transcript path."""
+    return await analyze_transcript_with_brev(payload)
 
 
 @app.get("/presentation/{presentation_id}/generated-slides")

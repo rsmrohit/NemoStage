@@ -108,6 +108,7 @@ function AppContent(): React.JSX.Element {
   const [recording, setRecording] = useState(false)
   const [transcriptDirectory, setTranscriptDirectory] = useState('')
   const [transcriptFile, setTranscriptFile] = useState<string | null>(null)
+  const [manualTranscript, setManualTranscript] = useState('')
   const [latestTranscriptEvent, setLatestTranscriptEvent] = useState<TranscriptFileEvent | null>(
     null
   )
@@ -433,6 +434,9 @@ function AppContent(): React.JSX.Element {
       }
 
       const combinedTranscript = currentBuffer.join(' ').trim()
+      if (!combinedTranscript) {
+        return []
+      }
       
       // Send the combined chunk
       setLiveAgentStatus('analyzing')
@@ -440,6 +444,12 @@ function AppContent(): React.JSX.Element {
 
       sendPresentationTranscript(activePresentationId, combinedTranscript)
         .then((result) => {
+          if ((result as unknown as Record<string, unknown>).noop === true) {
+            setLiveAgentStatus('ready')
+            setLiveAgentMessage('Waiting for transcript speech...')
+            return
+          }
+
           const agentSummary = result.agent_result.summary_so_far ?? ''
           const missingTopic = result.agent_result.topic ?? result.agent_result.off_slide_topic
           const matchedSlide = result.agent_result.matched_slide
@@ -502,9 +512,85 @@ function AppContent(): React.JSX.Element {
     }
 
     batchTimerRef.current = setTimeout(() => {
+      batchTimerRef.current = null
       void flushTranscriptBuffer()
     }, BATCH_INTERVAL_MS)
   }, [flushTranscriptBuffer])
+
+  const handleManualTranscriptSubmit = async (
+    event: React.FormEvent<HTMLFormElement>
+  ): Promise<void> => {
+    event.preventDefault()
+    const transcript = manualTranscript.trim()
+    const activePresentationId = presentationIdRef.current
+
+    if (!activePresentationId) {
+      setLiveAgentStatus('error')
+      setLiveAgentMessage('Start the live presentation before sending a manual transcript.')
+      return
+    }
+
+    if (!transcript) {
+      setLiveAgentStatus('ready')
+      setLiveAgentMessage('Enter transcript text to send a manual test chunk.')
+      return
+    }
+
+    setLiveAgentStatus('analyzing')
+    setLiveAgentMessage('Analyzing manual transcript against current slide...')
+
+    try {
+      const result = await sendPresentationTranscript(activePresentationId, transcript)
+      if ((result as unknown as Record<string, unknown>).noop === true) {
+        setLiveAgentStatus('ready')
+        setLiveAgentMessage('Manual transcript was empty.')
+        return
+      }
+
+      const agentSummary = result.agent_result.summary_so_far ?? ''
+      const missingTopic = result.agent_result.topic ?? result.agent_result.off_slide_topic
+      const matchedSlide = result.agent_result.matched_slide
+      const generationQueued = (result as unknown as Record<string, unknown>).generation_queued === true
+
+      setSlideGenerationNeeded(result.slide_generation_needed)
+      setManualTranscript('')
+
+      if (generationQueued) {
+        setLiveAgentStatus('slide-generation-needed')
+        setLiveAgentMessage(`Generating slide for: ${missingTopic ?? 'off-slide topic'}...`)
+        if (slideGenPollRef.current) clearInterval(slideGenPollRef.current)
+        slideGenPollRef.current = setInterval(async () => {
+          try {
+            const { slides: gen } = await getGeneratedSlides(activePresentationId)
+            if (gen.length > 0) {
+              setInjectedSlides(gen)
+              if (slideGenPollRef.current) clearInterval(slideGenPollRef.current)
+              setLiveAgentStatus('on-slide')
+              setLiveAgentMessage(`New slide ready: ${gen[gen.length - 1].title}`)
+            }
+          } catch {
+            // ignore transient polling failures
+          }
+        }, 5000)
+      } else if (result.coverage_status === 'not_covered') {
+        setLiveAgentStatus('slide-generation-needed')
+        setLiveAgentMessage(`Slide generation needed${missingTopic ? `: ${missingTopic}` : ''}`)
+      } else if (result.coverage_status === 'other_slide') {
+        setLiveAgentStatus('covered-elsewhere')
+        setLiveAgentMessage(
+          `Covered on another slide${typeof matchedSlide === 'number' ? ` (${matchedSlide + 1})` : ''}. ${
+            agentSummary || result.agent_result.reason || ''
+          }`.trim()
+        )
+      } else {
+        setLiveAgentStatus('on-slide')
+        setLiveAgentMessage(agentSummary || 'Manual transcript appears to be on the current slide.')
+      }
+    } catch (error) {
+      setLiveAgentStatus('error')
+      setLiveAgentMessage(`Manual transcript failed: ${getErrorMessage(error)}`)
+    }
+  }
 
   useEffect(() => {
     const unsubscribeTranscriptUpdate = window.electronAPI.onTranscriptUpdate((event) => {
@@ -1058,6 +1144,24 @@ function AppContent(): React.JSX.Element {
                   )}
 
                   <p className="live-agent-message">{liveAgentMessage}</p>
+
+                  <form className="transcript-form" onSubmit={(event) => void handleManualTranscriptSubmit(event)}>
+                    <label htmlFor="manual-transcript">Manual transcript test</label>
+                    <textarea
+                      id="manual-transcript"
+                      value={manualTranscript}
+                      onChange={(event) => setManualTranscript(event.currentTarget.value)}
+                      placeholder="Paste or type a transcript chunk to analyze..."
+                      disabled={!presentationId || liveAgentStatus === 'analyzing'}
+                    />
+                    <button
+                      className="primary"
+                      type="submit"
+                      disabled={!presentationId || !manualTranscript.trim() || liveAgentStatus === 'analyzing'}
+                    >
+                      Send transcript
+                    </button>
+                  </form>
 
                   <div className="transcript-recorder">
                     <button

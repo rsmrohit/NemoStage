@@ -61,28 +61,24 @@ app.whenReady().then(async () => {
 
   protocol.handle('nemostage-media', async (request) => {
     try {
-      // 1. Strip the custom scheme prefix entirely
-      // This turns "nemostage-media://users/rohits..." into "users/rohits..."
-      let rawPath = request.url.replace(/^nemostage-media:\/+/i, '')
+      const url = new URL(request.url)
+      let filePath = decodeURIComponent(url.pathname)
 
-      // 2. Decode spaces (%20) and special characters safely
-      let filePath = decodeURIComponent(rawPath)
-
-      // 3. Ensure it starts with a leading root slash on macOS/Linux
-      if (!filePath.startsWith('/')) {
-        filePath = '/' + filePath
+      if (process.platform === 'win32' && /^\/[A-Za-z]:\//.test(filePath)) {
+        filePath = filePath.slice(1)
+      } else if (url.hostname) {
+        filePath = `/${url.hostname}${filePath}`
       }
 
-      // 4. Verify file existence on disk
+      filePath = path.normalize(filePath)
+
       if (!fs.existsSync(filePath)) {
         console.error(`[nemostage-media] File missing at path: ${filePath}`)
         return new Response('Asset not found', { status: 404 })
       }
 
-      // 5. Read file safely as a binary data buffer
       const fileBuffer = fs.readFileSync(filePath)
 
-      // 6. Map content headers dynamically based on file extension
       const ext = filePath.split('.').pop()?.toLowerCase()
       const mimeTypes: Record<string, string> = {
         woff2: 'font/woff2',
