@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+websockets
+numpy
+sounddevice
+noisereduce
