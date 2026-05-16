@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { FileSelector } from './components/FileSelector'
 import { NavigationControls } from './components/NavigationControls'
@@ -29,6 +29,30 @@ type LiveAgentStatus =
   | 'slide-generation-needed'
   | 'error'
 
+interface TranscriptFileEvent {
+  type: 'sync' | 'interim' | 'final' | 'error' | string
+  text?: string
+  full_transcript?: string
+  timestamp?: string
+  segment_index?: number
+  source?: string
+  speaker?: string | null
+  session_id?: string
+  error?: string
+  transcript_file?: string
+}
+
+function getTranscriptEventKey(event: TranscriptFileEvent): string {
+  return [
+    event.transcript_file ?? '',
+    event.session_id ?? '',
+    event.segment_index ?? '',
+    event.timestamp ?? '',
+    event.type ?? '',
+    event.text ?? event.error ?? ''
+  ].join('|')
+}
+
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message
@@ -54,18 +78,34 @@ function AppContent(): React.JSX.Element {
 
   const [mode, setMode] = useState<AppMode>('select')
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarWidth, setSidebarWidth] = useState(220)
+  const [liveSidebarWidth, setLiveSidebarWidth] = useState(130)
+  const [agentPanelWidth, setAgentPanelWidth] = useState(260)
+  const [isSlideFullscreen, setIsSlideFullscreen] = useState(false)
+  const isSlideFullscreenRef = useRef(false)
+  const slideContainerRef = useRef<HTMLDivElement>(null)
   const [statusMessage, setStatusMessage] = useState('')
   const [extractionPhase, setExtractionPhase] = useState<ExtractionPhase>('idle')
   const [progress, setProgress] = useState(0)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([])
   const [presentationId, setPresentationId] = useState<string | null>(null)
-  const [transcriptText, setTranscriptText] = useState('')
   const [liveAgentStatus, setLiveAgentStatus] = useState<LiveAgentStatus>('idle')
   const [liveAgentMessage, setLiveAgentMessage] = useState('No transcript analyzed yet.')
   const [slideGenerationNeeded, setSlideGenerationNeeded] = useState(false)
   const [vectorizationInfo, setVectorizationInfo] = useState<VectorizationFields | null>(null)
   const [liveSlideIndex, setLiveSlideIndex] = useState(0)
+  const [recording, setRecording] = useState(false)
+  const [transcriptDirectory, setTranscriptDirectory] = useState('')
+  const [transcriptFile, setTranscriptFile] = useState<string | null>(null)
+  const [latestTranscriptEvent, setLatestTranscriptEvent] = useState<TranscriptFileEvent | null>(
+    null
+  )
+  const [transcriptBuffer, setTranscriptBuffer] = useState<string[]>([])
+  const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const BATCH_INTERVAL_MS = 20000 // 20 seconds
+  const presentationIdRef = useRef<string | null>(null)
+  const processedTranscriptEventRef = useRef<string | null>(null)
 
   const currentSlideImage = slides[currentSlide]?.imagePaths[0] ?? null
   const liveTotalSlides = totalSlides > 0 ? totalSlides + 1 : 0
@@ -74,13 +114,19 @@ function AppContent(): React.JSX.Element {
   const liveSlideImage = isAudienceQrSlide ? null : (slides[liveDeckSlideIndex]?.imagePaths[0] ?? null)
   const liveSlideData = isAudienceQrSlide ? null : (slideData[liveDeckSlideIndex] ?? null)
 
+  useEffect(() => {
+    presentationIdRef.current = presentationId
+  }, [presentationId])
+
   const loadRecentSessions = async (): Promise<void> => {
     try {
       const [sessions, sandbox] = await Promise.all([
         window.electronAPI.getRecentSessions(),
         listSandboxPresentations()
       ])
-      const sandboxFilenames = new Set(sandbox.presentations.map((presentation) => presentation.filename))
+      const sandboxFilenames = new Set(
+        sandbox.presentations.map((presentation) => presentation.filename)
+      )
       setRecentSessions(sessions.filter((session) => sandboxFilenames.has(session.fileName)))
     } catch (error) {
       setRecentSessions([])
@@ -194,6 +240,7 @@ function AppContent(): React.JSX.Element {
         previousLiveSlide()
       }
       if (event.key === 'Escape') {
+        if (isSlideFullscreenRef.current) return
         setMode('gallery')
       }
     }
@@ -271,6 +318,117 @@ function AppContent(): React.JSX.Element {
     }
   }, [currentSlide, mode, presentationId])
 
+  const flushTranscriptBuffer = useCallback(async (): Promise<void> => {
+    const activePresentationId = presentationIdRef.current
+    if (!activePresentationId) {
+      setLiveAgentStatus('error')
+      setLiveAgentMessage('Start the live presentation before recording transcript updates.')
+      return
+    }
+
+    // Get all buffered text and clear the buffer
+    setTranscriptBuffer((currentBuffer) => {
+      if (currentBuffer.length === 0) {
+        return currentBuffer
+      }
+
+      const combinedTranscript = currentBuffer.join(' ').trim()
+      
+      // Send the combined chunk
+      setLiveAgentStatus('analyzing')
+      setLiveAgentMessage('Analyzing transcript against current slide...')
+
+      sendPresentationTranscript(activePresentationId, combinedTranscript)
+        .then((result) => {
+          const agentSummary = result.agent_result.summary_so_far ?? ''
+          const missingTopic = result.agent_result.topic ?? result.agent_result.off_slide_topic
+          const matchedSlide = result.agent_result.matched_slide
+
+          setSlideGenerationNeeded(result.slide_generation_needed)
+          if (result.coverage_status === 'not_covered') {
+            setLiveAgentStatus('slide-generation-needed')
+            setLiveAgentMessage(`Slide generation needed${missingTopic ? `: ${missingTopic}` : ''}`)
+          } else if (result.coverage_status === 'other_slide') {
+            setLiveAgentStatus('covered-elsewhere')
+            setLiveAgentMessage(
+              `Covered on another slide${typeof matchedSlide === 'number' ? ` (${matchedSlide + 1})` : ''}. ${
+                agentSummary || result.agent_result.reason || ''
+              }`.trim()
+            )
+          } else {
+            setLiveAgentStatus('on-slide')
+            setLiveAgentMessage(agentSummary || 'Speaker appears to be on the current slide.')
+          }
+        })
+        .catch((error) => {
+          setLiveAgentStatus('error')
+          setLiveAgentMessage(`Transcript analysis failed: ${getErrorMessage(error)}`)
+        })
+
+      // Clear buffer after sending
+      return []
+    })
+  }, [])
+
+    const addToTranscriptBuffer = useCallback((text: string): void => {
+    const trimmedText = text.trim()
+    if (!trimmedText) {
+      return
+    }
+
+    setTranscriptBuffer((prev) => [...prev, trimmedText])
+
+    // Reset the 3-second timer
+    if (batchTimerRef.current) {
+      clearTimeout(batchTimerRef.current)
+    }
+
+    batchTimerRef.current = setTimeout(() => {
+      void flushTranscriptBuffer()
+    }, BATCH_INTERVAL_MS)
+  }, [flushTranscriptBuffer])
+
+  useEffect(() => {
+    const unsubscribeTranscriptUpdate = window.electronAPI.onTranscriptUpdate((event) => {
+      const transcriptEvent = event as TranscriptFileEvent
+      setLatestTranscriptEvent(transcriptEvent)
+
+      if (transcriptEvent.type === 'error') {
+        setLiveAgentStatus('error')
+        setLiveAgentMessage(transcriptEvent.error ?? 'Transcript file listener error.')
+        return
+      }
+
+      if (transcriptEvent.type !== 'final' || !transcriptEvent.text?.trim()) {
+        return
+      }
+
+      const eventKey = getTranscriptEventKey(transcriptEvent)
+      if (eventKey === processedTranscriptEventRef.current) {
+        return
+      }
+
+      processedTranscriptEventRef.current = eventKey
+      addToTranscriptBuffer(transcriptEvent.text) // Changed from analyzeTranscriptChunk
+    })
+
+    const unsubscribeTranscriptStatus = window.electronAPI.onTranscriptStatus((status) => {
+      setRecording(status.listening)
+      setTranscriptDirectory(status.directory)
+      setTranscriptFile(status.filePath)
+    })
+
+    return () => {
+      unsubscribeTranscriptUpdate()
+      unsubscribeTranscriptStatus()
+      
+      // Clean up timer on unmount
+      if (batchTimerRef.current) {
+        clearTimeout(batchTimerRef.current)
+      }
+    }
+  }, [addToTranscriptBuffer])
+
   const startExtraction = async (filePath: string): Promise<void> => {
     setErrorMessage(null)
     setStatusMessage('Starting extraction...')
@@ -332,6 +490,7 @@ function AppContent(): React.JSX.Element {
     await loadRecentSessions()
 
     if (selectedSessionId === sessionId) {
+      await window.electronAPI.stopTranscriptListener()
       reset()
       setMode('select')
       setPresentationId(null)
@@ -339,6 +498,8 @@ function AppContent(): React.JSX.Element {
       setLiveAgentMessage('No transcript analyzed yet.')
       setSlideGenerationNeeded(false)
       setVectorizationInfo(null)
+      setLatestTranscriptEvent(null)
+      setRecording(false)
       setStatusMessage('Session cleared')
     }
   }
@@ -392,9 +553,7 @@ function AppContent(): React.JSX.Element {
       goToSlide(0)
       setLiveAgentStatus('ready')
       setLiveAgentMessage(
-        result.vectorization_status === 'ready'
-          ? `Live transcript agent ready. Using isolated vector index (${result.chunks_indexed ?? 0} chunks).`
-          : `Live transcript agent ready, but vector search is ${result.vectorization_status ?? 'unavailable'}.`
+        'Live transcript agent ready. Hit record to listen for transcript JSON updates.'
       )
       setMode('live')
     } catch (error) {
@@ -403,78 +562,125 @@ function AppContent(): React.JSX.Element {
     }
   }
 
-  const handleTranscriptSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault()
-
+  const handleToggleRecording = async (): Promise<void> => {
     if (!presentationId) {
       setLiveAgentStatus('error')
-      setLiveAgentMessage('Start the live presentation before sending transcript.')
+      setLiveAgentMessage('Start the live presentation before recording transcript updates.')
       return
     }
-
-    const transcript = transcriptText.trim()
-    if (!transcript) {
-      return
-    }
-
-    setLiveAgentStatus('analyzing')
-    setLiveAgentMessage('Analyzing transcript against current slide...')
 
     try {
-      const result = await sendPresentationTranscript(presentationId, transcript)
-      const agentSummary = result.agent_result.summary_so_far ?? ''
-      const missingTopic = result.agent_result.topic ?? result.agent_result.off_slide_topic
-      const matchedSlide = result.agent_result.matched_slide
-
-      setSlideGenerationNeeded(result.slide_generation_needed)
-      if (result.coverage_status === 'not_covered') {
-        setLiveAgentStatus('slide-generation-needed')
-        setLiveAgentMessage(`Slide generation needed${missingTopic ? `: ${missingTopic}` : ''}`)
-      } else if (result.coverage_status === 'other_slide') {
-        setLiveAgentStatus('covered-elsewhere')
-        setLiveAgentMessage(
-          `Covered on another slide${typeof matchedSlide === 'number' ? ` (${matchedSlide + 1})` : ''}. ${
-            agentSummary || result.agent_result.reason || ''
-          }`.trim()
-        )
+      if (recording) {
+        const status = await window.electronAPI.stopTranscriptListener()
+        setRecording(status.listening)
+        setTranscriptDirectory(status.directory)
+        setTranscriptFile(status.filePath)
+        setLiveAgentStatus('ready')
+        setLiveAgentMessage('Transcript recording stopped.')
+        setTranscriptBuffer([]) // Clear buffer
       } else {
-        setLiveAgentStatus('on-slide')
-        setLiveAgentMessage(agentSummary || 'Speaker appears to be on the current slide.')
+        processedTranscriptEventRef.current = null
+        const status = await window.electronAPI.startTranscriptListener()
+        setRecording(status.listening)
+        setTranscriptDirectory(status.directory)
+        setTranscriptFile(status.filePath)
+        setLiveAgentStatus('ready')
+        setLiveAgentMessage('Listening for final transcript JSON updates.')
+        setTranscriptBuffer([]) // Clear buffer
       }
-      setTranscriptText('')
     } catch (error) {
       setLiveAgentStatus('error')
-      setLiveAgentMessage(`Transcript analysis failed: ${getErrorMessage(error)}`)
+      setLiveAgentMessage(`Transcript listener failed: ${getErrorMessage(error)}`)
     }
   }
 
+  useEffect(() => {
+    isSlideFullscreenRef.current = isSlideFullscreen
+  }, [isSlideFullscreen])
+
+  useEffect(() => {
+    const onFullscreenChange = (): void => setIsSlideFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [])
+
+  const toggleSlideFullscreen = useCallback(async (): Promise<void> => {
+    if (!document.fullscreenElement) {
+      await slideContainerRef.current?.requestFullscreen()
+    } else {
+      await document.exitFullscreen()
+    }
+  }, [])
+
+  const startResize = useCallback(
+    (
+      e: React.MouseEvent,
+      currentWidth: number,
+      setWidth: (w: number) => void,
+      min: number,
+      max: number,
+      reverse = false
+    ): void => {
+      e.preventDefault()
+      const startX = e.clientX
+
+      const onMouseMove = (ev: MouseEvent): void => {
+        const delta = reverse ? startX - ev.clientX : ev.clientX - startX
+        setWidth(Math.max(min, Math.min(max, currentWidth + delta)))
+      }
+
+      const onMouseUp = (): void => {
+        window.removeEventListener('mousemove', onMouseMove)
+        window.removeEventListener('mouseup', onMouseUp)
+      }
+
+      window.addEventListener('mousemove', onMouseMove)
+      window.addEventListener('mouseup', onMouseUp)
+    },
+    []
+  )
+
   const warningText = useMemo(() => warnings.join(' '), [warnings])
+  const latestTranscriptText =
+    latestTranscriptEvent?.text?.trim() || latestTranscriptEvent?.error || ''
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <FileSelector onSelect={startExtraction} />
+    <main
+      className={`app-shell${mode === 'live' ? ' app-live' : ''}`}
+      style={mode !== 'live' ? ({ '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties) : undefined}
+    >
+      {mode !== 'live' && (
+        <aside className="sidebar">
+          <FileSelector onSelect={startExtraction} />
 
-        {recentSessions.length > 0 && (
-          <section className="recent-sessions">
-            <h3>Recent Presentations</h3>
-            {recentSessions.map((session) => (
-              <div key={session.sessionId} className="recent-item">
-                <button type="button" onClick={() => void handleResumeSession(session.sessionId)}>
-                  {session.fileName}
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => void handleClearSession(session.sessionId)}
-                >
-                  Clear
-                </button>
-              </div>
-            ))}
-          </section>
-        )}
-      </aside>
+          {recentSessions.length > 0 && (
+            <section className="recent-sessions">
+              <h3>Recent Presentations</h3>
+              {recentSessions.map((session) => (
+                <div key={session.sessionId} className="recent-item">
+                  <button type="button" onClick={() => void handleResumeSession(session.sessionId)}>
+                    {session.fileName}
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void handleClearSession(session.sessionId)}
+                  >
+                    Clear
+                  </button>
+                </div>
+              ))}
+            </section>
+          )}
+        </aside>
+      )}
+
+      {mode !== 'live' && (
+        <div
+          className="sidebar-resizer"
+          onMouseDown={(e) => startResize(e, sidebarWidth, setSidebarWidth, 160, 480)}
+        />
+      )}
 
       <section className="workspace">
         <header className="status-bar">
@@ -523,11 +729,17 @@ function AppContent(): React.JSX.Element {
               onExit={() => setMode('gallery')}
               sidebarOpen={sidebarOpen}
               onToggleSidebar={() => setSidebarOpen((state) => !state)}
+              isFullscreen={isSlideFullscreen}
+              onFullscreen={() => void toggleSlideFullscreen()}
             />
 
-            <div className={`live-layout ${sidebarOpen ? '' : 'no-sidebar'}`}>
+            <div
+              className={`live-layout ${sidebarOpen ? '' : 'no-sidebar'}`}
+              style={sidebarOpen ? ({ '--live-sidebar-width': `${liveSidebarWidth}px` } as React.CSSProperties) : undefined}
+            >
               {sidebarOpen && (
-                <aside className="thumbnail-sidebar">
+                <>
+                  <aside className="thumbnail-sidebar">
                   <button
                     type="button"
                     className={`thumb-mini audience-thumb ${liveSlideIndex === 0 ? 'active' : ''}`}
@@ -536,34 +748,56 @@ function AppContent(): React.JSX.Element {
                     <div className="audience-thumb-preview">QR</div>
                     <span>1</span>
                   </button>
-                  {slides.map((slide, index) => (
-                    <button
-                      key={slide.slideIndex}
-                      type="button"
-                      className={`thumb-mini ${index + 1 === liveSlideIndex ? 'active' : ''}`}
-                      onClick={() => goToLiveSlide(index + 1)}
-                    >
-                      {slide.thumbnailPath ? (
-                        <img src={slide.thumbnailPath} alt={`Slide ${index + 2}`} />
-                      ) : (
-                        <span>No preview</span>
-                      )}
-                      <span>{index + 2}</span>
-                    </button>
-                  ))}
-                </aside>
+                    {slides.map((slide, index) => (
+                      <button
+                        key={slide.slideIndex}
+                        type="button"
+                        className={`thumb-mini ${index + 1 === liveSlideIndex ? 'active' : ''}`}
+                        onClick={() => goToLiveSlide(index + 1)}
+                      >
+                        {slide.thumbnailPath ? (
+                          <img src={slide.thumbnailPath} alt={`Slide ${index + 2}`} />
+                        ) : (
+                          <span>No preview</span>
+                        )}
+                        <span>{index + 2}</span>
+                      </button>
+                    ))}
+                  </aside>
+                  <div
+                    className="sidebar-resizer"
+                    onMouseDown={(e) => startResize(e, liveSidebarWidth, setLiveSidebarWidth, 80, 280)}
+                  />
+                </>
               )}
 
-              <div className="live-stage">
-                {isAudienceQrSlide ? (
-                  <AudienceQrSlide audienceUrl={NEMOSTAGE_AUDIENCE_URL} />
-                ) : (
-                  <SlideCanvas
-                    currentSlide={liveDeckSlideIndex}
-                    slideData={liveSlideData}
-                    slideImage={liveSlideImage}
-                  />
-                )}
+              <div
+                className="live-stage"
+                style={{ '--agent-panel-width': `${agentPanelWidth}px` } as React.CSSProperties}
+              >
+                <div ref={slideContainerRef} className="slide-fullscreen-wrapper">
+                  {isAudienceQrSlide ? (
+                    <AudienceQrSlide audienceUrl={NEMOSTAGE_AUDIENCE_URL} />
+                  ) : (
+                    <SlideCanvas
+                      currentSlide={liveDeckSlideIndex}
+                      slideData={liveSlideData}
+                      slideImage={liveSlideImage}
+                    />
+                  )}
+                  <button
+                    className="fullscreen-exit-btn"
+                    type="button"
+                    onClick={() => void toggleSlideFullscreen()}
+                  >
+                    Exit Fullscreen
+                  </button>
+                </div>
+
+                <div
+                  className="sidebar-resizer"
+                  onMouseDown={(e) => startResize(e, agentPanelWidth, setAgentPanelWidth, 180, 480, true)}
+                />
 
                 <aside className="live-agent-panel" aria-label="Live transcript agent">
                   <div className="live-agent-header">
@@ -573,7 +807,7 @@ function AppContent(): React.JSX.Element {
                         ? 'generation needed'
                         : liveAgentStatus === 'covered-elsewhere'
                           ? 'covered elsewhere'
-                        : liveAgentStatus}
+                          : liveAgentStatus}
                     </span>
                   </div>
 
@@ -595,22 +829,33 @@ function AppContent(): React.JSX.Element {
 
                   <p className="live-agent-message">{liveAgentMessage}</p>
 
-                  <form className="transcript-form" onSubmit={(event) => void handleTranscriptSubmit(event)}>
-                    <label htmlFor="live-transcript">Live transcript chunk</label>
-                    <textarea
-                      id="live-transcript"
-                      value={transcriptText}
-                      onChange={(event) => setTranscriptText(event.target.value)}
-                      placeholder="Paste or type what the speaker just said..."
-                    />
+                  <div className="transcript-recorder">
                     <button
                       className="primary"
-                      type="submit"
-                      disabled={!presentationId || liveAgentStatus === 'analyzing' || !transcriptText.trim()}
+                      type="button"
+                      onClick={() => void handleToggleRecording()}
+                      disabled={!presentationId || (!recording && liveAgentStatus === 'analyzing')}
                     >
-                      {liveAgentStatus === 'analyzing' ? 'Analyzing...' : 'Send transcript'}
+                      {recording ? 'Stop record' : 'Hit record'}
                     </button>
-                  </form>
+
+                    <div className="transcript-source">
+                      <span>{recording ? 'Listening' : 'Paused'}</span>
+                      <small>
+                        {transcriptFile ||
+                          transcriptDirectory ||
+                          'Transcript folder not opened yet'}
+                      </small>
+                    </div>
+
+                    <div className="latest-transcript">
+                      <strong>Latest transcript JSON update</strong>
+                      <p>{latestTranscriptText || 'No transcript events received yet.'}</p>
+                      {latestTranscriptEvent?.timestamp && (
+                        <small>{latestTranscriptEvent.timestamp}</small>
+                      )}
+                    </div>
+                  </div>
                 </aside>
               </div>
             </div>

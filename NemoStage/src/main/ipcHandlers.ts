@@ -1,4 +1,5 @@
 import { BrowserWindow, dialog, ipcMain, type OpenDialogOptions } from 'electron'
+import type { FSWatcher } from 'fs'
 import fs from 'fs-extra'
 import path from 'path'
 import type {
@@ -7,7 +8,9 @@ import type {
   SessionMetadata,
   SessionRuntime,
   DoclingElement,
-  PptxManifest
+  PptxManifest,
+  TranscriptEvent,
+  TranscriptListenerStatus
 } from './types'
 import { extractPPTX, extractThemeFonts, parseSlideRelationships } from './services/pptxExtractor'
 import {
@@ -25,9 +28,26 @@ import { parsePPTXStructure } from './services/pptxXmlParser'
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
+const TRANSCRIPT_FILE_PATTERN = /^transcript_.*\.jsonl$/
 const sessions = new Map<string, SessionRuntime>()
 const doclingManifests = new Map<string, PptxManifest>()
 const parsingSessions = new Set<string>()
+
+const transcriptWatchState: {
+  directoryWatcher: FSWatcher | null
+  fileWatcher: FSWatcher | null
+  directory: string | null
+  filePath: string | null
+  lastEventKey: string | null
+  debounceTimer: NodeJS.Timeout | null
+} = {
+  directoryWatcher: null,
+  fileWatcher: null,
+  directory: null,
+  filePath: null,
+  lastEventKey: null,
+  debounceTimer: null
+}
 
 function emitToRenderer(window: BrowserWindow | null, channel: string, payload: unknown): void {
   if (window && !window.isDestroyed()) {
@@ -38,6 +58,150 @@ function emitToRenderer(window: BrowserWindow | null, channel: string, payload: 
 function toFileUrl(absolutePath: string): string {
   const normalized = absolutePath.replace(/\\/g, '/')
   return `nemostage-media:///${encodeURI(normalized)}`
+}
+
+async function resolveTranscriptDirectory(): Promise<string> {
+  const candidates = [
+    process.env.NEMOSTAGE_TRANSCRIPT_DIR,
+    path.resolve(process.cwd(), '..', 'backend', 'transcript', 'transcripts'),
+    path.resolve(process.cwd(), 'backend', 'transcript', 'transcripts')
+  ].filter(Boolean) as string[]
+
+  for (const candidate of candidates) {
+    if (await fs.pathExists(candidate)) {
+      return candidate
+    }
+  }
+
+  return candidates[0]
+}
+
+async function getLatestTranscriptFile(directory: string): Promise<string | null> {
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => [])
+  const files = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && TRANSCRIPT_FILE_PATTERN.test(entry.name))
+      .map(async (entry) => {
+        const filePath = path.join(directory, entry.name)
+        const stat = await fs.stat(filePath).catch(() => null)
+        return stat ? { filePath, mtimeMs: stat.mtimeMs } : null
+      })
+  )
+
+  return (
+    files
+      .filter((entry): entry is { filePath: string; mtimeMs: number } => entry !== null)
+      .sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.filePath ?? null
+  )
+}
+
+async function readLastTranscriptEvent(filePath: string): Promise<TranscriptEvent | null> {
+  const content = await fs.readFile(filePath, 'utf8').catch(() => '')
+  const line = content
+    .split(/\r?\n/)
+    .reverse()
+    .find((entry) => entry.trim().length > 0)
+
+  if (!line) {
+    return null
+  }
+
+  try {
+    return JSON.parse(line) as TranscriptEvent
+  } catch {
+    return {
+      type: 'error',
+      error: `Could not parse latest transcript JSON line in ${path.basename(filePath)}`
+    }
+  }
+}
+
+function getTranscriptEventKey(event: TranscriptEvent, filePath: string): string {
+  return [
+    filePath,
+    event.session_id ?? '',
+    event.segment_index ?? '',
+    event.timestamp ?? '',
+    event.type ?? '',
+    event.text ?? event.error ?? ''
+  ].join('|')
+}
+
+function closeTranscriptFileWatcher(): void {
+  transcriptWatchState.fileWatcher?.close()
+  transcriptWatchState.fileWatcher = null
+  transcriptWatchState.filePath = null
+}
+
+function stopTranscriptWatcher(): void {
+  transcriptWatchState.directoryWatcher?.close()
+  transcriptWatchState.directoryWatcher = null
+  closeTranscriptFileWatcher()
+  if (transcriptWatchState.debounceTimer) {
+    clearTimeout(transcriptWatchState.debounceTimer)
+    transcriptWatchState.debounceTimer = null
+  }
+  transcriptWatchState.directory = null
+  transcriptWatchState.lastEventKey = null
+}
+
+function getTranscriptListenerStatus(): TranscriptListenerStatus {
+  return {
+    listening: transcriptWatchState.directoryWatcher !== null,
+    directory: transcriptWatchState.directory ?? '',
+    filePath: transcriptWatchState.filePath
+  }
+}
+
+function scheduleTranscriptRead(window: BrowserWindow | null, delayMs = 80): void {
+  if (transcriptWatchState.debounceTimer) {
+    clearTimeout(transcriptWatchState.debounceTimer)
+  }
+
+  transcriptWatchState.debounceTimer = setTimeout(() => {
+    transcriptWatchState.debounceTimer = null
+    void publishLatestTranscriptEvent(window)
+  }, delayMs)
+}
+
+async function watchTranscriptFile(window: BrowserWindow | null, filePath: string): Promise<void> {
+  if (transcriptWatchState.filePath === filePath && transcriptWatchState.fileWatcher) {
+    return
+  }
+
+  closeTranscriptFileWatcher()
+  transcriptWatchState.filePath = filePath
+  transcriptWatchState.fileWatcher = fs.watch(filePath, () => scheduleTranscriptRead(window))
+  emitToRenderer(window, 'transcript:status', getTranscriptListenerStatus())
+}
+
+async function publishLatestTranscriptEvent(window: BrowserWindow | null): Promise<void> {
+  if (!transcriptWatchState.directory) {
+    return
+  }
+
+  const latestFile = await getLatestTranscriptFile(transcriptWatchState.directory)
+  if (!latestFile) {
+    emitToRenderer(window, 'transcript:status', getTranscriptListenerStatus())
+    return
+  }
+
+  await watchTranscriptFile(window, latestFile)
+  const event = await readLastTranscriptEvent(latestFile)
+  if (!event) {
+    return
+  }
+
+  const eventKey = getTranscriptEventKey(event, latestFile)
+  if (eventKey === transcriptWatchState.lastEventKey) {
+    return
+  }
+
+  transcriptWatchState.lastEventKey = eventKey
+  emitToRenderer(window, 'transcript:update', {
+    ...event,
+    transcript_file: latestFile
+  })
 }
 
 async function validatePptxFile(filePath: string): Promise<string[]> {
@@ -302,26 +466,26 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     }
 
     const manifest = doclingManifests.get(sessionId)
-    
+
     if (!manifest) {
       console.log('[pptx:getData] No manifest found')
       return { slideIndex, elements: [] }
     }
 
     console.log(`[pptx:getData] === Processing slide ${slideIndex} ===`)
-    
+
     // NEW: Direct access to slides array
     const slide = manifest.slides?.[slideIndex]
-    
+
     if (!slide) {
       console.log(`[pptx:getData] ❌ No slide at index ${slideIndex}`)
       return { slideIndex, elements: [] }
     }
 
     console.log(`[pptx:getData] ✅ Found slide with ${slide.elements.length} elements`)
-    
+
     // Convert PptxElement to DoclingElement format (for renderer compatibility)
-    const elements: DoclingElement[] = slide.elements.map(element => {
+    const elements: DoclingElement[] = slide.elements.map((element) => {
       if (element.type === 'text') {
         const firstRun = element.textRuns?.[0]
         return {
@@ -431,6 +595,24 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     doclingManifests.delete(sessionId)
     return true
   })
+
+  ipcMain.handle('transcript:startListening', async () => {
+    stopTranscriptWatcher()
+
+    const directory = await resolveTranscriptDirectory()
+    await fs.ensureDir(directory)
+    transcriptWatchState.directory = directory
+    transcriptWatchState.directoryWatcher = fs.watch(directory, () => {
+      scheduleTranscriptRead(getMainWindow())
+    })
+
+    await publishLatestTranscriptEvent(getMainWindow())
+    emitToRenderer(getMainWindow(), 'transcript:status', getTranscriptListenerStatus())
+    return getTranscriptListenerStatus()
+  })
+
+  ipcMain.handle('transcript:stopListening', async () => {
+    stopTranscriptWatcher()
+    return getTranscriptListenerStatus()
+  })
 }
-
-

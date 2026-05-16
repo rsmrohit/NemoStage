@@ -14,6 +14,8 @@ const electronAPI: ElectronAPI = {
   updateSessionState: (sessionId, currentSlide) =>
     ipcRenderer.invoke('pptx:updateSessionState', sessionId, currentSlide),
   clearSession: (sessionId) => ipcRenderer.invoke('pptx:clearSession', sessionId),
+  startTranscriptListener: () => ipcRenderer.invoke('transcript:startListening'),
+  stopTranscriptListener: () => ipcRenderer.invoke('transcript:stopListening'),
   onExtractionProgress: (callback) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
@@ -51,6 +53,32 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on('pptx:doclingError', listener)
     return () => {
       ipcRenderer.removeListener('pptx:doclingError', listener)
+    }
+  },
+  onTranscriptUpdate: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ): void => {
+      callback(payload)
+    }
+
+    ipcRenderer.on('transcript:update', listener)
+    return () => {
+      ipcRenderer.removeListener('transcript:update', listener)
+    }
+  },
+  onTranscriptStatus: (callback) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      payload: Parameters<typeof callback>[0]
+    ): void => {
+      callback(payload)
+    }
+
+    ipcRenderer.on('transcript:status', listener)
+    return () => {
+      ipcRenderer.removeListener('transcript:status', listener)
     }
   },
   onLog: (callback) => {

@@ -6,6 +6,8 @@ interface NavigationControlsProps {
   onExit: () => void
   sidebarOpen: boolean
   onToggleSidebar: () => void
+  isFullscreen: boolean
+  onFullscreen: () => void
 }
 
 export function NavigationControls({
@@ -15,7 +17,9 @@ export function NavigationControls({
   onPrevious,
   onExit,
   sidebarOpen,
-  onToggleSidebar
+  onToggleSidebar,
+  isFullscreen,
+  onFullscreen
 }: NavigationControlsProps): React.JSX.Element {
   return (
     <nav className="navigation-controls" aria-label="Slide navigation controls">
@@ -30,6 +34,9 @@ export function NavigationControls({
       </span>
       <button type="button" onClick={onToggleSidebar}>
         {sidebarOpen ? 'Hide Thumbnails' : 'Show Thumbnails'}
+      </button>
+      <button type="button" onClick={onFullscreen}>
+        {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
       </button>
       <button type="button" onClick={onExit}>
         Exit

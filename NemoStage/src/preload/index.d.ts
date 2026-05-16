@@ -58,6 +58,25 @@ export interface ExtractionProgressEvent {
   message: string
 }
 
+export interface TranscriptEvent {
+  type: 'sync' | 'interim' | 'final' | 'error' | string
+  text?: string
+  full_transcript?: string
+  timestamp?: string
+  segment_index?: number
+  source?: string
+  speaker?: string | null
+  session_id?: string
+  error?: string
+  transcript_file?: string
+}
+
+export interface TranscriptListenerStatus {
+  listening: boolean
+  directory: string
+  filePath: string | null
+}
+
 export interface SandboxUploadResult {
   status: string
   filename: string
@@ -87,9 +106,13 @@ export interface ElectronAPI {
   resumeSession: (sessionId: string) => Promise<ExtractionResult>
   updateSessionState: (sessionId: string, currentSlide: number) => Promise<boolean>
   clearSession: (sessionId: string) => Promise<boolean>
+  startTranscriptListener: () => Promise<TranscriptListenerStatus>
+  stopTranscriptListener: () => Promise<TranscriptListenerStatus>
   onExtractionProgress: (callback: (event: ExtractionProgressEvent) => void) => () => void
   onDoclingReady: (callback: (event: { sessionId: string }) => void) => () => void
   onDoclingError: (callback: (event: { sessionId: string; message: string }) => void) => () => void
+  onTranscriptUpdate: (callback: (event: TranscriptEvent) => void) => () => void
+  onTranscriptStatus: (callback: (event: TranscriptListenerStatus) => void) => () => void
   onLog: (callback: (event: { sessionId: string; message: string }) => void) => () => void
 }
 

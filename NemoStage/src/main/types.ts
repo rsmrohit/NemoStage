@@ -33,12 +33,12 @@ export interface PptxTableCell {
   fillColor?: string
   colSpan?: number
   rowSpan?: number
-  isContinuation?: boolean  // hMerge or vMerge — skip in rendering
+  isContinuation?: boolean // hMerge or vMerge — skip in rendering
 }
 
 export interface PptxTableRow {
   cells: PptxTableCell[]
-  height: number  // EMUs
+  height: number // EMUs
 }
 
 export interface PptxElement {
@@ -64,10 +64,10 @@ export interface TextRun {
   italic?: boolean
   underline?: boolean
   strikethrough?: boolean
-  baseline?: number  // percent; positive = superscript, negative = subscript
+  baseline?: number // percent; positive = superscript, negative = subscript
   color: string
   paragraphAlign?: 'l' | 'ctr' | 'r' | 'just'
-  lineHeight?: number   // CSS line-height multiplier for this paragraph
+  lineHeight?: number // CSS line-height multiplier for this paragraph
 }
 
 // Keep DoclingElement for renderer compatibility
@@ -92,7 +92,10 @@ export interface DoclingElement {
   verticalAnchor?: 't' | 'ctr' | 'b'
   shapeGeom?: string
   textBoxStyle?: {
-    insL?: number; insR?: number; insT?: number; insB?: number
+    insL?: number
+    insR?: number
+    insT?: number
+    insB?: number
     wrapNone?: boolean
   }
   tableRows?: PptxTableRow[]
@@ -145,7 +148,7 @@ export interface DoclingRef {
 
 export interface DoclingGroup {
   self_ref: string
-  label: string  // "slide" for PowerPoint slides
+  label: string // "slide" for PowerPoint slides
   name: string
   children: DoclingRef[]
   parent?: DoclingRef
@@ -153,7 +156,7 @@ export interface DoclingGroup {
 
 export interface DoclingText {
   self_ref: string
-  label: string  // "paragraph", "title", "section_header"
+  label: string // "paragraph", "title", "section_header"
   text: string
   prov?: DoclingProvenance[]
   parent?: DoclingRef
@@ -182,10 +185,10 @@ export interface DoclingProvenance {
 }
 
 export interface DoclingBoundingBox {
-  l: number  // left
-  t: number  // top
-  r: number  // right
-  b: number  // bottom
+  l: number // left
+  t: number // top
+  r: number // right
+  b: number // bottom
   coord_origin: 'TOPLEFT' | 'BOTTOMLEFT'
 }
 
@@ -217,6 +220,24 @@ export interface ExtractionProgressEvent {
   message: string
 }
 
+export interface TranscriptEvent {
+  type: 'sync' | 'interim' | 'final' | 'error' | string
+  text?: string
+  full_transcript?: string
+  timestamp?: string
+  segment_index?: number
+  source?: string
+  speaker?: string | null
+  session_id?: string
+  error?: string
+}
+
+export interface TranscriptListenerStatus {
+  listening: boolean
+  directory: string
+  filePath: string | null
+}
+
 export interface SessionRuntime {
   sessionId: string
   sessionDir: string
@@ -229,11 +250,10 @@ export interface SlideManifestEntry {
   imagePaths: string[]
 }
 
-
 export interface PptxManifest {
   slideCount: number
-  slideWidth: number   // In EMUs
-  slideHeight: number  // In EMUs
+  slideWidth: number // In EMUs
+  slideHeight: number // In EMUs
   slides: PptxSlide[]
 }
 
@@ -241,14 +261,14 @@ export interface PptxSlide {
   slideIndex: number
   elements: PptxElement[]
   speakerNotes?: string
-  background?: string  // CSS color string, e.g. '#FF0000' or 'transparent'
+  background?: string // CSS color string, e.g. '#FF0000' or 'transparent'
 }
 
 export interface ImageCrop {
-  left: number    // Percentage from left (0-100)
-  top: number     // Percentage from top (0-100)
-  right: number   // Percentage from right (0-100)
-  bottom: number  // Percentage from bottom (0-100)
+  left: number // Percentage from left (0-100)
+  top: number // Percentage from top (0-100)
+  right: number // Percentage from right (0-100)
+  bottom: number // Percentage from bottom (0-100)
 }
 
 export interface PptxElement {
@@ -268,7 +288,10 @@ export interface PptxElement {
   verticalAnchor?: 't' | 'ctr' | 'b'
   shapeGeom?: string
   textBoxStyle?: {
-    insL?: number; insR?: number; insT?: number; insB?: number
+    insL?: number
+    insR?: number
+    insT?: number
+    insB?: number
     wrapNone?: boolean
   }
   tableRows?: PptxTableRow[]
