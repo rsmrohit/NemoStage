@@ -48,20 +48,21 @@ CHROMA_ROOT = "/home/asus/nemostage-chroma"
 BREV_OLLAMA_URL = "http://127.0.0.1:11436"
 BREV_OLLAMA_MODEL = "gemma4:26b"
 
-# Port 11437 = SSH tunnel → Brev L40S (environmental-yellow-lizard), brev-tunnel.service
-# nemotron-3-nano:4b for both classify and generate — confirmed available, 100% accuracy
-_BREV = "http://127.0.0.1:11437"
+# 11437 = brev-tunnel.service → L40S (environmental-yellow-lizard), direct SSH
+# 11438 = h200-tunnel.service → H200 (upper-coral-quelea), cloudflared proxy
+_L40S = "http://127.0.0.1:11437"
+_H200 = "http://127.0.0.1:11438"
 CLASSIFY_POOL = [
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
+    (_L40S, "nemotron-3-nano:4b"),
+    (_L40S, "nemotron-3-nano:4b"),
+    (_L40S, "nemotron-3-nano:4b"),
+    (_L40S, "nemotron-3-nano:4b"),
 ]
 GENERATE_POOL = [
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
-    (_BREV, "nemotron-3-nano:4b"),
+    (_H200, "qwen3.6:35b"),
+    (_H200, "qwen3.6:35b"),
+    (_H200, "qwen3.6:35b"),
+    (_H200, "qwen3.6:35b"),
 ]
 
 # Image generation — set to a running FLUX/diffusers endpoint to enable
