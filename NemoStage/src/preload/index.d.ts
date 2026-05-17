@@ -117,6 +117,43 @@ export interface EmbeddedFontEntry {
   boldItalicUrl?: string
 }
 
+export type TimelineSlideType = 'qr' | 'deck' | 'generated'
+
+export interface TimelineEntryInput {
+  presentationId: string
+  sessionId: string
+  fileName: string
+  liveSlideIndex: number
+  deckSlideIndex: number | null
+  slideType: TimelineSlideType
+  timestampMs: number
+  elapsedMs: number
+}
+
+export interface DashboardPoint {
+  elapsedMs: number
+  value: number
+}
+
+export interface DashboardMemberSeries {
+  memberId: string
+  averageEngagementScore: number
+  points: DashboardPoint[]
+  intervalPoints?: DashboardPoint[]
+}
+
+export interface DashboardInterval {
+  intervalIndex: number
+  slideLabel: string
+  slideType: TimelineSlideType
+  startMs: number
+  endMs: number
+  durationMs: number
+  avgEngagement: number
+  peakEngagement: number
+  deltaFromPrevious: number
+}
+
 export interface ElectronAPI {
   selectPPTX: () => Promise<string | null>
   selectPresentationMaterials: () => Promise<string[]>
@@ -142,6 +179,49 @@ export interface ElectronAPI {
   clearSession: (sessionId: string) => Promise<boolean>
   startTranscriptListener: () => Promise<TranscriptListenerStatus>
   stopTranscriptListener: () => Promise<TranscriptListenerStatus>
+  startTimelineSession: (payload: {
+    presentationId: string
+    sessionId: string
+    fileName: string
+    startedAtMs: number
+  }) => Promise<{ directory: string; filePath: string }>
+  appendTimelineEntry: (entry: TimelineEntryInput) => Promise<{ filePath: string }>
+  clearTimelineSession: (presentationId: string) => Promise<boolean>
+  startEngagementAnalyzer: (payload: {
+    presentationId: string
+    sessionId: string
+    timelineDir: string
+  }) => Promise<{ status: 'idle' | 'running' | 'stopped' | 'error'; outputDir: string }>
+  stopEngagementAnalyzer: (
+    presentationId: string
+  ) => Promise<{ status: 'idle' | 'running' | 'stopped' | 'error' }>
+  getEngagementAnalyzerStatus: (
+    presentationId: string
+  ) => Promise<{ status: 'idle' | 'running' | 'stopped' | 'error'; errorMessage: string | null }>
+  getDashboardPresentationData: (presentationId: string) => Promise<{
+    meta: { presentationId: string; sessionId: string; fileName: string; startedAtMs: number }
+    timeline: Array<{
+      liveSlideIndex: number
+      deckSlideIndex: number | null
+      slideType: TimelineSlideType
+      timestampMs: number
+      elapsedMs: number
+    }>
+    averageSeries: DashboardPoint[]
+    memberSeries: DashboardMemberSeries[]
+    intervals: DashboardInterval[]
+  }>
+  listDashboardSessions: (fileName: string) => Promise<
+    Array<{
+      presentationId: string
+      sessionId: string
+      fileName: string
+      startedAtMs: number
+      pointCount: number
+      averageEngagement: number | null
+      sparkline: DashboardPoint[]
+    }>
+  >
   onExtractionProgress: (callback: (event: ExtractionProgressEvent) => void) => () => void
   onDoclingReady: (callback: (event: { sessionId: string; googleFontNames: string[] }) => void) => () => void
   onDoclingError: (callback: (event: { sessionId: string; message: string }) => void) => () => void

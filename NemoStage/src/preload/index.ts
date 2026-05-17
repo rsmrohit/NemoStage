@@ -21,6 +21,16 @@ const electronAPI: ElectronAPI = {
   clearSession: (sessionId) => ipcRenderer.invoke('pptx:clearSession', sessionId),
   startTranscriptListener: () => ipcRenderer.invoke('transcript:startListening'),
   stopTranscriptListener: () => ipcRenderer.invoke('transcript:stopListening'),
+  startTimelineSession: (payload) => ipcRenderer.invoke('timeline:startSession', payload),
+  appendTimelineEntry: (entry) => ipcRenderer.invoke('timeline:appendEntry', entry),
+  clearTimelineSession: (presentationId) => ipcRenderer.invoke('timeline:clearSession', presentationId),
+  startEngagementAnalyzer: (payload) => ipcRenderer.invoke('engagement:startAnalyzer', payload),
+  stopEngagementAnalyzer: (presentationId) => ipcRenderer.invoke('engagement:stopAnalyzer', presentationId),
+  getEngagementAnalyzerStatus: (presentationId) =>
+    ipcRenderer.invoke('engagement:getAnalyzerStatus', presentationId),
+  getDashboardPresentationData: (presentationId) =>
+    ipcRenderer.invoke('dashboard:getPresentationData', presentationId),
+  listDashboardSessions: (fileName) => ipcRenderer.invoke('dashboard:listSessions', fileName),
   onExtractionProgress: (callback) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
