@@ -40,6 +40,7 @@ import {
 } from './services/engagementAnalyzerManager'
 import {
   getPresentationDashboardData,
+  getSessionDashboardData,
   listPresentationDashboardSessions
 } from './services/engagementDashboard'
 
@@ -773,6 +774,13 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   ipcMain.handle('dashboard:getPresentationData', async (_event, presentationId: string) => {
     return getPresentationDashboardData(presentationId)
   })
+
+  ipcMain.handle(
+    'dashboard:getSessionData',
+    async (_event, payload: { sessionId: string; startedAtMs: number }) => {
+      return getSessionDashboardData(payload.sessionId, payload.startedAtMs)
+    }
+  )
 
   ipcMain.handle('dashboard:listSessions', async (_event, fileName: string) => {
     return listPresentationDashboardSessions(fileName)

@@ -153,7 +153,7 @@ function AppContent(): React.JSX.Element {
   const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([])
   const [presentationId, setPresentationId] = useState<string | null>(null)
   const [dashboardSessions, setDashboardSessions] = useState<DashboardSessionSummary[]>([])
-  const [selectedDashboardPresentationId, setSelectedDashboardPresentationId] = useState<string | null>(null)
+  const [selectedDashboardSessionKey, setSelectedDashboardSessionKey] = useState<string | null>(null)
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([])
   const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('idle')
@@ -317,25 +317,28 @@ function AppContent(): React.JSX.Element {
     try {
       const sessions = await window.electronAPI.listDashboardSessions(fileName)
       setDashboardSessions(sessions as DashboardSessionSummary[])
-      if (sessions.length > 0 && !selectedDashboardPresentationId) {
-        setSelectedDashboardPresentationId(sessions[0].presentationId)
+      if (sessions.length > 0 && !selectedDashboardSessionKey) {
+        setSelectedDashboardSessionKey(getDashboardSessionKey(sessions[0]))
       }
     } catch (error) {
       setStatusMessage(`Dashboard sessions unavailable: ${getErrorMessage(error)}`)
       setDashboardSessions([])
     }
-  }, [fileName, selectedDashboardPresentationId])
+  }, [fileName, getDashboardSessionKey, selectedDashboardSessionKey])
 
-  const loadDashboardData = useCallback(async (presentationIdToLoad: string): Promise<void> => {
+  const loadDashboardData = useCallback(
+    async (sessionSelection: { sessionId: string; startedAtMs: number }): Promise<void> => {
     try {
-      const data = await window.electronAPI.getDashboardPresentationData(presentationIdToLoad)
+      const data = await window.electronAPI.getDashboardSessionData(sessionSelection)
       setDashboardData(data as DashboardData)
       setSelectedMemberIds([])
     } catch (error) {
       setStatusMessage(`Dashboard data unavailable: ${getErrorMessage(error)}`)
       setDashboardData(null)
     }
-  }, [])
+    },
+    []
+  )
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -352,12 +355,19 @@ function AppContent(): React.JSX.Element {
   }, [loadDashboardSessions])
 
   useEffect(() => {
-    if (!selectedDashboardPresentationId) {
+    if (!selectedDashboardSessionKey) {
       setDashboardData(null)
       return
     }
-    void loadDashboardData(selectedDashboardPresentationId)
-  }, [loadDashboardData, selectedDashboardPresentationId])
+    const selected = dashboardSessions.find(
+      (session) => getDashboardSessionKey(session) === selectedDashboardSessionKey
+    )
+    if (!selected) {
+      setDashboardData(null)
+      return
+    }
+    void loadDashboardData({ sessionId: selected.sessionId, startedAtMs: selected.startedAtMs })
+  }, [dashboardSessions, getDashboardSessionKey, loadDashboardData, selectedDashboardSessionKey])
 
   useEffect(() => {
     const unsubscribeProgress = window.electronAPI.onExtractionProgress((event) => {
@@ -894,9 +904,7 @@ function AppContent(): React.JSX.Element {
       await loadRecentSessions()
       const sessions = await window.electronAPI.listDashboardSessions(result.fileName)
       setDashboardSessions(sessions as DashboardSessionSummary[])
-      setSelectedDashboardPresentationId(
-        sessions.length > 0 ? sessions[0].presentationId : null
-      )
+      setSelectedDashboardSessionKey(sessions.length > 0 ? getDashboardSessionKey(sessions[0]) : null)
     } catch (error) {
       setExtractionPhase('error')
       setErrorMessage((error as Error).message)
@@ -916,9 +924,7 @@ function AppContent(): React.JSX.Element {
       setVectorizationInfo(null)
       const sessions = await window.electronAPI.listDashboardSessions(result.fileName)
       setDashboardSessions(sessions as DashboardSessionSummary[])
-      setSelectedDashboardPresentationId(
-        sessions.length > 0 ? sessions[0].presentationId : null
-      )
+      setSelectedDashboardSessionKey(sessions.length > 0 ? getDashboardSessionKey(sessions[0]) : null)
       if (result.doclingStatus === 'ready') {
         console.log('[fonts] handleResumeSession: doclingStatus=ready, fetching fonts for session', selectedSessionId)
         const [fonts, status] = await Promise.all([
@@ -1275,9 +1281,9 @@ function AppContent(): React.JSX.Element {
                       key={`${session.presentationId}-${session.startedAtMs}`}
                       type="button"
                       className={`dashboard-session-item ${
-                        selectedDashboardPresentationId === session.presentationId ? 'active' : ''
+                        selectedDashboardSessionKey === getDashboardSessionKey(session) ? 'active' : ''
                       }`}
-                      onClick={() => setSelectedDashboardPresentationId(session.presentationId)}
+                      onClick={() => setSelectedDashboardSessionKey(getDashboardSessionKey(session))}
                     >
                       <span>{new Date(session.startedAtMs).toLocaleString()}</span>
                       <span>
@@ -1531,3 +1537,8 @@ function App(): React.JSX.Element {
 }
 
 export default App
+  const getDashboardSessionKey = useCallback(
+    (session: Pick<DashboardSessionSummary, 'sessionId' | 'startedAtMs'>): string =>
+      `${session.sessionId}:${session.startedAtMs}`,
+    []
+  )

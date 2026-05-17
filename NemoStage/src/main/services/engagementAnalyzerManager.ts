@@ -79,7 +79,7 @@ export async function startEngagementAnalyzer(params: {
 
   child.stderr.on('data', (data) => {
     const text = data.toString('utf8').trim()
-    if (text.length > 0) {
+    if (text.length > 0 && /(\bERROR\b|Traceback|Exception|failed)/i.test(text)) {
       runtime.errorMessage = text
     }
   })

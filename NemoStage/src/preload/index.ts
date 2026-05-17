@@ -30,6 +30,7 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.invoke('engagement:getAnalyzerStatus', presentationId),
   getDashboardPresentationData: (presentationId) =>
     ipcRenderer.invoke('dashboard:getPresentationData', presentationId),
+  getDashboardSessionData: (payload) => ipcRenderer.invoke('dashboard:getSessionData', payload),
   listDashboardSessions: (fileName) => ipcRenderer.invoke('dashboard:listSessions', fileName),
   onExtractionProgress: (callback) => {
     const listener = (

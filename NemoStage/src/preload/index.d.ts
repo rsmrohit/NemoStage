@@ -211,6 +211,22 @@ export interface ElectronAPI {
     memberSeries: DashboardMemberSeries[]
     intervals: DashboardInterval[]
   }>
+  getDashboardSessionData: (payload: {
+    sessionId: string
+    startedAtMs: number
+  }) => Promise<{
+    meta: { presentationId: string; sessionId: string; fileName: string; startedAtMs: number }
+    timeline: Array<{
+      liveSlideIndex: number
+      deckSlideIndex: number | null
+      slideType: TimelineSlideType
+      timestampMs: number
+      elapsedMs: number
+    }>
+    averageSeries: DashboardPoint[]
+    memberSeries: DashboardMemberSeries[]
+    intervals: DashboardInterval[]
+  }>
   listDashboardSessions: (fileName: string) => Promise<
     Array<{
       presentationId: string

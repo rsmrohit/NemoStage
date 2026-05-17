@@ -78,6 +78,23 @@ function findTimelineByPresentationId(presentationId: string): { timelinePath: s
   return null
 }
 
+function findTimelineBySessionIdentity(
+  sessionId: string,
+  startedAtMs: number
+): { timelinePath: string; timeline: TimelineFile } | null {
+  const entries = fs.readdirSync(WORKSPACE_DIR, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('slide_timeline_')) continue
+    const timelinePath = path.join(WORKSPACE_DIR, entry.name, 'timeline.json')
+    const timeline = loadTimeline(timelinePath)
+    if (!timeline) continue
+    if (timeline.sessionId === sessionId && Number(timeline.startedAtMs) === Number(startedAtMs)) {
+      return { timelinePath, timeline }
+    }
+  }
+  return null
+}
+
 function discoverEngagementFiles(engagementDir: string): {
   summaryFile: string | null
   memberDir: string | null
@@ -288,12 +305,7 @@ function loadIntervalAverageOverrideFlexible(filePath: string | null): {
   }
 }
 
-export function getPresentationDashboardData(presentationId: string): Record<string, unknown> {
-  const found = findTimelineByPresentationId(presentationId)
-  if (!found) {
-    throw new Error('Timeline not found for presentation.')
-  }
-
+function buildDashboardData(found: { timelinePath: string; timeline: TimelineFile }): Record<string, unknown> {
   const timelineDir = path.dirname(found.timelinePath)
   const engagementDir = path.join(timelineDir, 'engagement')
   const discovered = discoverEngagementFiles(engagementDir)
@@ -343,6 +355,22 @@ export function getPresentationDashboardData(presentationId: string): Record<str
       ratio: coverageRatio
     }
   }
+}
+
+export function getPresentationDashboardData(presentationId: string): Record<string, unknown> {
+  const found = findTimelineByPresentationId(presentationId)
+  if (!found) {
+    throw new Error('Timeline not found for presentation.')
+  }
+  return buildDashboardData(found)
+}
+
+export function getSessionDashboardData(sessionId: string, startedAtMs: number): Record<string, unknown> {
+  const found = findTimelineBySessionIdentity(sessionId, startedAtMs)
+  if (!found) {
+    throw new Error('Timeline not found for session.')
+  }
+  return buildDashboardData(found)
 }
 
 export function listPresentationDashboardSessions(fileName: string): Array<Record<string, unknown>> {
