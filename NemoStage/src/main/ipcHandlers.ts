@@ -27,6 +27,21 @@ import {
 import { parsePPTXStructure } from './services/pptxXmlParser'
 import { downloadGoogleFonts } from './services/googleFontsDownloader'
 import { pathToMediaUrl } from './services/mediaProtocol'
+import {
+  appendTimelineEntry,
+  clearTimelineSession,
+  startTimelineSession,
+  type TimelineEntryInput
+} from './services/slideTimelineManager'
+import {
+  getEngagementAnalyzerStatus,
+  startEngagementAnalyzer,
+  stopEngagementAnalyzer
+} from './services/engagementAnalyzerManager'
+import {
+  getPresentationDashboardData,
+  listPresentationDashboardSessions
+} from './services/engagementDashboard'
 
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const NEMOSTAGE_BACKEND_URL = 'http://169.233.123.64:8000'
@@ -719,5 +734,47 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   ipcMain.handle('transcript:stopListening', async () => {
     stopTranscriptWatcher()
     return getTranscriptListenerStatus()
+  })
+
+  ipcMain.handle(
+    'timeline:startSession',
+    async (
+      _event,
+      payload: { presentationId: string; sessionId: string; fileName: string; startedAtMs: number }
+    ) => {
+      return startTimelineSession(payload)
+    }
+  )
+
+  ipcMain.handle('timeline:appendEntry', async (_event, payload: TimelineEntryInput) => {
+    return appendTimelineEntry(payload)
+  })
+
+  ipcMain.handle('timeline:clearSession', async (_event, presentationId: string) => {
+    clearTimelineSession(presentationId)
+    return true
+  })
+
+  ipcMain.handle(
+    'engagement:startAnalyzer',
+    async (_event, payload: { presentationId: string; sessionId: string; timelineDir: string }) => {
+      return startEngagementAnalyzer(payload)
+    }
+  )
+
+  ipcMain.handle('engagement:stopAnalyzer', async (_event, presentationId: string) => {
+    return stopEngagementAnalyzer(presentationId)
+  })
+
+  ipcMain.handle('engagement:getAnalyzerStatus', async (_event, presentationId: string) => {
+    return getEngagementAnalyzerStatus(presentationId)
+  })
+
+  ipcMain.handle('dashboard:getPresentationData', async (_event, presentationId: string) => {
+    return getPresentationDashboardData(presentationId)
+  })
+
+  ipcMain.handle('dashboard:listSessions', async (_event, fileName: string) => {
+    return listPresentationDashboardSessions(fileName)
   })
 }

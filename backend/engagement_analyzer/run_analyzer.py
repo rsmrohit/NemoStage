@@ -5,6 +5,7 @@ import argparse
 import cv2
 import sys
 import logging
+import time
 from pathlib import Path
 from engagement_analyzer import (
     AudienceMemberEngagementTracker,
@@ -153,6 +154,7 @@ def main():
     logger.info("Press 'q' to quit")
     
     frame_count = 0
+    started_at = time.monotonic()
     
     try:
         while True:
@@ -163,14 +165,15 @@ def main():
             
             # Process frame
             person_states = analyzer.process_frame(frame)
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
             
             # Log results
             logger_obj.log_frame(frame_count, person_states)
-            summary = aggregator.add_frame(frame_count, person_states)
+            summary = aggregator.add_frame(frame_count, person_states, timestamp_ms=elapsed_ms)
             if summary is not None:
                 logger_obj.log_summary(summary)
             if member_tracker is not None:
-                member_tracker.add_frame(frame_count, frame, person_states)
+                member_tracker.add_frame(frame_count, frame, person_states, timestamp_ms=elapsed_ms)
             
             # Draw overlays if requested
             if args.draw or args.display:

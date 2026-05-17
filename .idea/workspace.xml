@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="ec709568-da05-430d-945d-579617236d4b" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools-82.0.1.dist-info/INSTALLER" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools-82.0.1.dist-info/METADATA" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools-82.0.1.dist-info/RECORD" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools-82.0.1.dist-info/WHEEL" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools-82.0.1.dist-info/entry_points.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools-82.0.1.dist-info/licenses/LICENSE" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools-82.0.1.dist-info/top_level.txt" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_apply_pyprojecttoml.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_apply_pyprojecttoml.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/NOTICE" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/NOTICE" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/error_reporting.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/error_reporting.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/extra_validations.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/extra_validations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/fastjsonschema_validations.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/fastjsonschema_validations.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/formats.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/_validate_pyproject/formats.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/pyprojecttoml.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/pyprojecttoml.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/setuptools.schema.json" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/config/setuptools.schema.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/launcher manifest.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/config/test_apply_pyprojecttoml.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/config/test_apply_pyprojecttoml.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/config/test_pyprojecttoml.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/config/test_pyprojecttoml.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_develop.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_develop.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_editable_install.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_editable_install.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_namespaces.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_namespaces.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_setuptools.py" beforeDir="false" afterPath="$PROJECT_DIR$/.venv/lib/python3.12/site-packages/setuptools/tests/test_setuptools.py" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotChats">
+    <option name="panelChat">
+      <chat>
+        <option name="activeSessionId" value="d5a916f3-9677-411c-8544-9d413671cc79" />
+        <option name="sessions">
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="d5a916f3-9677-411c-8544-9d413671cc79" />
+            <option name="modeId" value="Ask" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="auto" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+        </option>
+        <option name="type" value="PANEL" />
+      </chat>
+    </option>
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_/Users/shiva/Documents/NemoStage" value="3DojTqnH2CuUhgOtuETZMI5tbcV" />
+    </persistenceIdMap>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+    <option name="ROOT_SYNC" value="DONT_SYNC" />
+  </component>
+  <component name="McpProjectServerCommands">
+    <commands />
+    <urls />
+  </component>
+  <component name="NextEditCompletionFeaturesState">
+    <decayedCancelled>
+      <entry key="MS100" value="1.06712370260486" />
+      <entry key="MS500" value="2.761776791398134" />
+      <entry key="S2" value="7.3334476443865" />
+      <entry key="S5" value="13.73307894170996" />
+      <entry key="S10" value="19.956602490356353" />
+      <entry key="S30" value="46.24066421268688" />
+      <entry key="S60" value="93.23558394669804" />
+      <entry key="M2" value="153.93168509174035" />
+      <entry key="M5" value="300.979346875909" />
+      <entry key="M10" value="566.5208241732081" />
+      <entry key="M15" value="813.6920758099349" />
+      <entry key="M30" value="1494.0373331024562" />
+      <entry key="H1" value="2622.5815464365082" />
+      <entry key="H2" value="4070.4732658067496" />
+      <entry key="H4" value="5399.764871984718" />
+      <entry key="D1" value="7102.900629308324" />
+      <entry key="W1" value="7472.699205631505" />
+    </decayedCancelled>
+    <decayedSelected>
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="5.0179581719837005E-89" />
+      <entry key="S5" value="4.788624848088323E-36" />
+      <entry key="S10" value="2.1882926787996756E-18" />
+      <entry key="S30" value="1.2982803057647377E-6" />
+      <entry key="S60" value="0.0011394210397235593" />
+      <entry key="M2" value="0.03375531128168666" />
+      <entry key="M5" value="0.2578322961100336" />
+      <entry key="M10" value="0.5083031760292515" />
+      <entry key="M15" value="0.6432480983589881" />
+      <entry key="M30" value="0.8964286019179177" />
+      <entry key="H1" value="1.3502067553612929" />
+      <entry key="H2" value="2.0507676400544486" />
+      <entry key="H4" value="2.765040413653162" />
+      <entry key="D1" value="3.7424461696536735" />
+      <entry key="W1" value="3.9616628527862097" />
+    </decayedSelected>
+    <decayedShown>
+      <entry key="MS100" value="0.22178181325273383" />
+      <entry key="MS500" value="2.4390240082918466" />
+      <entry key="S2" value="7.231693399058392" />
+      <entry key="S5" value="13.679381232785373" />
+      <entry key="S10" value="19.92284071205201" />
+      <entry key="S30" value="46.2252787188093" />
+      <entry key="S60" value="93.22690064192881" />
+      <entry key="M2" value="153.95905615861525" />
+      <entry key="M5" value="301.2328440512303" />
+      <entry key="M10" value="567.025599017554" />
+      <entry key="M15" value="814.3321994206991" />
+      <entry key="M30" value="1494.9310834210933" />
+      <entry key="H1" value="2623.929393471087" />
+      <entry key="H2" value="4072.522175814891" />
+      <entry key="H4" value="5402.5286710788005" />
+      <entry key="D1" value="7106.642801966707" />
+      <entry key="W1" value="7476.660827348036" />
+    </decayedShown>
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 7,
+  &quot;fromUser&quot;: false
+}</component>
+  <component name="ProjectId" id="3DojTqnH2CuUhgOtuETZMI5tbcV" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.MCP Project settings loaded": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
+    "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
+    "dart.analysis.tool.window.visible": "false",
+    "git-widget-placeholder": "Engagement-Analysis",
+    "junie.onboarding.icon.badge.shown": "true",
+    "last_opened_file_path": "/Users/shiva/Documents/NemoStage/backend/engagement_analyzer/engagement_logs",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "ml.llm.AcpAgentsConfigurable",
+    "to.speed.mode.migration.done": "true",
+    "vue.rearranger.settings.migration": "true"
+  }
+}]]></component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/backend/engagement_analyzer/engagement_logs" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/NemoStage" />
+      <recent name="$PROJECT_DIR$/backend/engagement_analyzer" />
+    </key>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.24374.152" />
+        <option value="bundled-python-sdk-c59985aa861c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.24374.152" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="ec709568-da05-430d-945d-579617236d4b" name="Changes" comment="" />
+      <created>1778955327926</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1778955327926</updated>
+      <workItem from="1778955329675" duration="104000" />
+      <workItem from="1778955491525" duration="18239000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+    <option name="exactExcludedFiles">
+      <list>
+        <option value="$PROJECT_DIR$/NemoStage/src/preload/index.d.ts" />
+      </list>
+    </option>
+  </component>
+  <component name="github-copilot-workspace">
+    <instructionFileLocations>
+      <option value=".github/instructions" />
+    </instructionFileLocations>
+    <promptFileLocations>
+      <option value=".github/prompts" />
+    </promptFileLocations>
+  </component>
+</project>

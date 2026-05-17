@@ -73,10 +73,19 @@ class EngagementAggregator:
         self.current_bucket_index: Optional[int] = None
         self.previous_smoothed_score: Optional[float] = None
 
-    def add_frame(self, frame_id: int, person_states: List[PersonState]) -> Optional[EngagementBucketSummary]:
+    def add_frame(
+        self,
+        frame_id: int,
+        person_states: List[PersonState],
+        timestamp_ms: Optional[int] = None,
+    ) -> Optional[EngagementBucketSummary]:
         """Add one frame and return a completed bucket summary when available."""
-        timestamp_ms = self._frame_to_ms(frame_id)
-        bucket_index = int((timestamp_ms / 1000.0) // self.bucket_seconds)
+        resolved_timestamp_ms = (
+            int(timestamp_ms)
+            if timestamp_ms is not None
+            else self._frame_to_ms(frame_id)
+        )
+        bucket_index = int((resolved_timestamp_ms / 1000.0) // self.bucket_seconds)
 
         if self.current_bucket_index is None:
             self.current_bucket_index = bucket_index
@@ -225,20 +234,30 @@ class AudienceMemberEngagementTracker:
         self.member_buckets: Dict[str, Dict] = {}
         self.pending_tracks: Dict[int, Dict] = {}
 
-    def add_frame(self, frame_id: int, frame: np.ndarray, person_states: List[PersonState]) -> None:
+    def add_frame(
+        self,
+        frame_id: int,
+        frame: np.ndarray,
+        person_states: List[PersonState],
+        timestamp_ms: Optional[int] = None,
+    ) -> None:
         """Assign current people to stable members and collect per-member bucket stats."""
-        timestamp_ms = self._frame_to_ms(frame_id)
-        bucket_index = int((timestamp_ms / 1000.0) // self.bucket_seconds)
+        resolved_timestamp_ms = (
+            int(timestamp_ms)
+            if timestamp_ms is not None
+            else self._frame_to_ms(frame_id)
+        )
+        bucket_index = int((resolved_timestamp_ms / 1000.0) // self.bucket_seconds)
         used_visible_members = set()
 
         for person in person_states:
-            member_id = self._resolve_member(frame, person, timestamp_ms, used_visible_members)
+            member_id = self._resolve_member(frame, person, resolved_timestamp_ms, used_visible_members)
             if member_id is None:
                 continue
             if person.state != "absent":
                 used_visible_members.add(member_id)
-            self._add_member_state(member_id, bucket_index, timestamp_ms, person)
-        self._cleanup_pending_tracks(timestamp_ms)
+            self._add_member_state(member_id, bucket_index, resolved_timestamp_ms, person)
+        self._cleanup_pending_tracks(resolved_timestamp_ms)
 
     def flush(self) -> None:
         """Write any partial per-member buckets."""

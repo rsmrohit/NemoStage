@@ -7,6 +7,7 @@ import { SlideGallery } from './components/SlideGallery'
 import { AudienceQrSlide } from './components/AudienceQrSlide'
 import { GeneratedSlideCard } from './components/GeneratedSlideCard'
 import { QAOverlay } from './components/QAOverlay'
+import { EngagementDashboard } from './components/EngagementDashboard'
 import {
   NEMOSTAGE_AUDIENCE_URL,
   deleteSandboxPresentation,
@@ -48,6 +49,53 @@ interface TranscriptFileEvent {
   intent?: boolean
 }
 
+type LiveSlot = { type: 'qr' } | { type: 'deck'; deckIndex: number } | { type: 'generated'; slide: GeneratedSlide }
+type AnalyzerStatus = 'idle' | 'running' | 'stopped' | 'error'
+
+interface DashboardSessionSummary {
+  presentationId: string
+  sessionId: string
+  fileName: string
+  startedAtMs: number
+  pointCount: number
+  averageEngagement: number | null
+  sparkline: Array<{ elapsedMs: number; value: number }>
+}
+
+interface DashboardData {
+  meta: { presentationId: string; sessionId: string; fileName: string; startedAtMs: number }
+  timeline: Array<{
+    liveSlideIndex: number
+    deckSlideIndex: number | null
+    slideType: 'qr' | 'deck' | 'generated'
+    timestampMs: number
+    elapsedMs: number
+  }>
+  averageSeries: Array<{ elapsedMs: number; value: number }>
+  memberSeries: Array<{
+    memberId: string
+    averageEngagementScore: number
+    points: Array<{ elapsedMs: number; value: number }>
+    intervalPoints?: Array<{ elapsedMs: number; value: number }>
+  }>
+  intervals: Array<{
+    intervalIndex: number
+    slideLabel: string
+    slideType: 'qr' | 'deck' | 'generated'
+    startMs: number
+    endMs: number
+    durationMs: number
+    avgEngagement: number
+    peakEngagement: number
+    deltaFromPrevious: number
+  }>
+  coverage?: {
+    timelineMs: number
+    engagementMs: number
+    ratio: number
+  }
+}
+
 function getTranscriptEventKey(event: TranscriptFileEvent): string {
   return [
     event.transcript_file ?? '',
@@ -69,6 +117,7 @@ function getErrorMessage(error: unknown): string {
 function AppContent(): React.JSX.Element {
   const {
     sessionId,
+    fileName,
     currentSlide,
     totalSlides,
     slides,
@@ -101,6 +150,12 @@ function AppContent(): React.JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [recentSessions, setRecentSessions] = useState<SessionMetadata[]>([])
   const [presentationId, setPresentationId] = useState<string | null>(null)
+  const [dashboardSessions, setDashboardSessions] = useState<DashboardSessionSummary[]>([])
+  const [selectedDashboardPresentationId, setSelectedDashboardPresentationId] = useState<string | null>(null)
+  const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([])
+  const [analyzerStatus, setAnalyzerStatus] = useState<AnalyzerStatus>('idle')
+  const [analyzerErrorMessage, setAnalyzerErrorMessage] = useState<string | null>(null)
   const [liveAgentStatus, setLiveAgentStatus] = useState<LiveAgentStatus>('idle')
   const [liveAgentMessage, setLiveAgentMessage] = useState('No transcript analyzed yet.')
   const [slideGenerationNeeded, setSlideGenerationNeeded] = useState(false)
@@ -119,6 +174,10 @@ function AppContent(): React.JSX.Element {
   const presentationIdRef = useRef<string | null>(null)
   const processedTranscriptEventRef = useRef<string | null>(null)
   const recordingStartTimeRef = useRef<number>(0)
+  const liveTimelineStartTimeRef = useRef<number>(0)
+  const timelineReadyRef = useRef(false)
+  const timelineDirRef = useRef<string | null>(null)
+  const previousModeRef = useRef<AppMode>('select')
   const [injectedSlides, setInjectedSlides] = useState<GeneratedSlide[]>([])
   const slideGenPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [activeQA, setActiveQA] = useState<QAEntry | null>(null)
@@ -134,7 +193,6 @@ function AppContent(): React.JSX.Element {
 
   // Build the merged live slide sequence: [QR(0), deck slide 1, ...injected after N..., deck slide 2, ...]
   const liveMergedSlides = useMemo(() => {
-    type LiveSlot = { type: 'qr' } | { type: 'deck'; deckIndex: number } | { type: 'generated'; slide: GeneratedSlide }
     const slots: LiveSlot[] = [{ type: 'qr' }]
     for (let i = 0; i < totalSlides; i++) {
       slots.push({ type: 'deck', deckIndex: i })
@@ -152,6 +210,34 @@ function AppContent(): React.JSX.Element {
   const liveDeckSlideIndex = currentLiveSlot.type === 'deck' ? (currentLiveSlot as { type: 'deck'; deckIndex: number }).deckIndex : 0
   const liveSlideImage = (isAudienceQrSlide || isGeneratedSlide) ? null : (slides[liveDeckSlideIndex]?.imagePaths[0] ?? null)
   const liveSlideData = (isAudienceQrSlide || isGeneratedSlide) ? null : (slideData[liveDeckSlideIndex] ?? null)
+
+  const appendTimelineEntry = useCallback(
+    (slot: LiveSlot, nextLiveSlideIndex: number): void => {
+      if (!timelineReadyRef.current || !presentationIdRef.current || !sessionId || !fileName) {
+        return
+      }
+
+      const now = Date.now()
+      const elapsedMs = Math.max(0, now - liveTimelineStartTimeRef.current)
+      const deckSlideIndex = slot.type === 'deck' ? slot.deckIndex : null
+
+      void window.electronAPI
+        .appendTimelineEntry({
+          presentationId: presentationIdRef.current,
+          sessionId,
+          fileName,
+          liveSlideIndex: nextLiveSlideIndex,
+          deckSlideIndex,
+          slideType: slot.type,
+          timestampMs: now,
+          elapsedMs
+        })
+        .catch((error) => {
+          setStatusMessage(`Timeline write failed: ${getErrorMessage(error)}`)
+        })
+    },
+    [fileName, sessionId]
+  )
 
   useEffect(() => {
     presentationIdRef.current = presentationId
@@ -221,6 +307,34 @@ function AppContent(): React.JSX.Element {
     }
   }
 
+  const loadDashboardSessions = useCallback(async (): Promise<void> => {
+    if (!fileName) {
+      setDashboardSessions([])
+      return
+    }
+    try {
+      const sessions = await window.electronAPI.listDashboardSessions(fileName)
+      setDashboardSessions(sessions as DashboardSessionSummary[])
+      if (sessions.length > 0 && !selectedDashboardPresentationId) {
+        setSelectedDashboardPresentationId(sessions[0].presentationId)
+      }
+    } catch (error) {
+      setStatusMessage(`Dashboard sessions unavailable: ${getErrorMessage(error)}`)
+      setDashboardSessions([])
+    }
+  }, [fileName, selectedDashboardPresentationId])
+
+  const loadDashboardData = useCallback(async (presentationIdToLoad: string): Promise<void> => {
+    try {
+      const data = await window.electronAPI.getDashboardPresentationData(presentationIdToLoad)
+      setDashboardData(data as DashboardData)
+      setSelectedMemberIds([])
+    } catch (error) {
+      setStatusMessage(`Dashboard data unavailable: ${getErrorMessage(error)}`)
+      setDashboardData(null)
+    }
+  }, [])
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void loadRecentSessions()
@@ -230,6 +344,18 @@ function AppContent(): React.JSX.Element {
       window.clearTimeout(timer)
     }
   }, [])
+
+  useEffect(() => {
+    void loadDashboardSessions()
+  }, [loadDashboardSessions])
+
+  useEffect(() => {
+    if (!selectedDashboardPresentationId) {
+      setDashboardData(null)
+      return
+    }
+    void loadDashboardData(selectedDashboardPresentationId)
+  }, [loadDashboardData, selectedDashboardPresentationId])
 
   useEffect(() => {
     const unsubscribeProgress = window.electronAPI.onExtractionProgress((event) => {
@@ -311,6 +437,9 @@ function AppContent(): React.JSX.Element {
 
   const goToLiveSlide = useCallback((index: number): void => {
     const boundedIndex = Math.max(0, Math.min(index, Math.max(liveTotalSlides - 1, 0)))
+    if (boundedIndex === liveSlideIndex) {
+      return
+    }
     setLiveSlideIndex(boundedIndex)
 
     const slot = liveMergedSlides[boundedIndex]
@@ -319,7 +448,10 @@ function AppContent(): React.JSX.Element {
     } else if (slot?.type === 'generated') {
       goToSlide(slot.slide.after_slide)
     }
-  }, [goToSlide, liveMergedSlides, liveTotalSlides])
+    if (slot) {
+      appendTimelineEntry(slot, boundedIndex)
+    }
+  }, [appendTimelineEntry, goToSlide, liveMergedSlides, liveSlideIndex, liveTotalSlides])
 
   const nextLiveSlide = useCallback((): void => {
     goToLiveSlide(liveSlideIndex + 1)
@@ -328,6 +460,20 @@ function AppContent(): React.JSX.Element {
   const previousLiveSlide = useCallback((): void => {
     goToLiveSlide(liveSlideIndex - 1)
   }, [goToLiveSlide, liveSlideIndex])
+
+  const stopAnalyzerIfRunning = useCallback(async (): Promise<void> => {
+    const activePresentationId = presentationIdRef.current
+    if (!activePresentationId) {
+      return
+    }
+    try {
+      const result = await window.electronAPI.stopEngagementAnalyzer(activePresentationId)
+      setAnalyzerStatus(result.status)
+      setAnalyzerErrorMessage(null)
+    } catch (error) {
+      setStatusMessage(`Analyzer stop failed: ${getErrorMessage(error)}`)
+    }
+  }, [])
 
   useEffect(() => {
     if (mode !== 'live') {
@@ -412,6 +558,29 @@ function AppContent(): React.JSX.Element {
       window.clearInterval(timer)
     }
   }, [currentSlide, doclingStatus, sessionId, setDoclingStatus, setSlideData])
+
+  useEffect(() => {
+    const previousMode = previousModeRef.current
+    if (previousMode === 'live' && mode !== 'live') {
+      void stopAnalyzerIfRunning()
+      timelineReadyRef.current = false
+      void loadDashboardSessions()
+    }
+    previousModeRef.current = mode
+  }, [loadDashboardSessions, mode, stopAnalyzerIfRunning])
+
+  useEffect(() => {
+    if (mode !== 'live' || !presentationId) {
+      return
+    }
+    const timer = window.setInterval(() => {
+      void window.electronAPI.getEngagementAnalyzerStatus(presentationId).then((status) => {
+        setAnalyzerStatus(status.status)
+        setAnalyzerErrorMessage(status.errorMessage)
+      })
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [mode, presentationId])
 
   useEffect(() => {
     if (mode !== 'live' || !presentationId) {
@@ -707,6 +876,11 @@ function AppContent(): React.JSX.Element {
       setProgress(1)
       setExtractionPhase('ready')
       await loadRecentSessions()
+      const sessions = await window.electronAPI.listDashboardSessions(result.fileName)
+      setDashboardSessions(sessions as DashboardSessionSummary[])
+      setSelectedDashboardPresentationId(
+        sessions.length > 0 ? sessions[0].presentationId : null
+      )
     } catch (error) {
       setExtractionPhase('error')
       setErrorMessage((error as Error).message)
@@ -724,6 +898,11 @@ function AppContent(): React.JSX.Element {
       setExtractionPhase('ready')
       setProgress(1)
       setVectorizationInfo(null)
+      const sessions = await window.electronAPI.listDashboardSessions(result.fileName)
+      setDashboardSessions(sessions as DashboardSessionSummary[])
+      setSelectedDashboardPresentationId(
+        sessions.length > 0 ? sessions[0].presentationId : null
+      )
       if (result.doclingStatus === 'ready') {
         console.log('[fonts] handleResumeSession: doclingStatus=ready, fetching fonts for session', selectedSessionId)
         const [fonts, status] = await Promise.all([
@@ -758,6 +937,12 @@ function AppContent(): React.JSX.Element {
     setRecentSessions((prev) => prev.filter((s) => s.sessionId !== selectedSessionId))
 
     if (selectedSessionId === sessionId) {
+      await stopAnalyzerIfRunning()
+      if (presentationIdRef.current) {
+        await window.electronAPI.clearTimelineSession(presentationIdRef.current)
+      }
+      timelineReadyRef.current = false
+      timelineDirRef.current = null
       await window.electronAPI.stopTranscriptListener()
       reset()
       setMode('select')
@@ -771,6 +956,8 @@ function AppContent(): React.JSX.Element {
       clearFonts()
       setLatestTranscriptEvent(null)
       setRecording(false)
+      setAnalyzerStatus('idle')
+      setAnalyzerErrorMessage(null)
       setStatusMessage('Session cleared')
     }
   }
@@ -816,16 +1003,39 @@ function AppContent(): React.JSX.Element {
       return
     }
 
+    timelineReadyRef.current = false
     setErrorMessage(null)
     setLiveAgentStatus('starting')
     setLiveAgentMessage('Starting live presentation session...')
     setSlideGenerationNeeded(false)
 
     try {
+      const presentationIdCandidate = sessionId
+      const timelineStartedAtMs = Date.now()
+      liveTimelineStartTimeRef.current = timelineStartedAtMs
+      const timelineSession = await window.electronAPI.startTimelineSession({
+        presentationId: presentationIdCandidate,
+        sessionId,
+        fileName: fileName ?? '',
+        startedAtMs: timelineStartedAtMs
+      })
+      timelineDirRef.current = timelineSession.directory
+      timelineReadyRef.current = true
+      const analyzer = await window.electronAPI.startEngagementAnalyzer({
+        presentationId: presentationIdCandidate,
+        sessionId,
+        timelineDir: timelineSession.directory
+      })
+      setAnalyzerStatus(analyzer.status)
+      const analyzerState = await window.electronAPI.getEngagementAnalyzerStatus(
+        presentationIdCandidate
+      )
+      setAnalyzerErrorMessage(analyzerState.errorMessage)
+
       const presentationSlides = await buildPresentationSlides()
       const result = await startPresentation({
         session_id: sessionId,
-        file_name: usePresentationStore.getState().fileName ?? '',
+        file_name: fileName ?? '',
         slide_count: totalSlides,
         current_slide: 0,
         slides: presentationSlides
@@ -835,12 +1045,19 @@ function AppContent(): React.JSX.Element {
       setVectorizationInfo(result)
       setLiveSlideIndex(0)
       goToSlide(0)
+      appendTimelineEntry({ type: 'qr' }, 0)
       setLiveAgentStatus('ready')
       setLiveAgentMessage(
         'Live transcript agent ready. Hit record to listen for transcript JSON updates.'
       )
       setMode('live')
     } catch (error) {
+      if (sessionId) {
+        await window.electronAPI.stopEngagementAnalyzer(sessionId).catch(() => undefined)
+        await window.electronAPI.clearTimelineSession(sessionId).catch(() => undefined)
+      }
+      timelineReadyRef.current = false
+      timelineDirRef.current = null
       setLiveAgentStatus('error')
       setLiveAgentMessage(`Could not start live session: ${getErrorMessage(error)}`)
     }
@@ -888,6 +1105,12 @@ function AppContent(): React.JSX.Element {
     document.addEventListener('fullscreenchange', onFullscreenChange)
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
   }, [])
+
+  useEffect(() => {
+    return () => {
+      void stopAnalyzerIfRunning()
+    }
+  }, [stopAnalyzerIfRunning])
 
   const toggleSlideFullscreen = useCallback(async (): Promise<void> => {
     if (!document.fullscreenElement) {
@@ -1018,6 +1241,39 @@ function AppContent(): React.JSX.Element {
                 </div>
               </div>
             )}
+
+            <section className="dashboard-sessions">
+              <h3>Previous Sessions</h3>
+              {dashboardSessions.length === 0 && <p className="placeholder-text">No previous session analytics yet.</p>}
+              {dashboardSessions.length > 0 && (
+                <div className="dashboard-session-list">
+                  {dashboardSessions.map((session) => (
+                    <button
+                      key={`${session.presentationId}-${session.startedAtMs}`}
+                      type="button"
+                      className={`dashboard-session-item ${
+                        selectedDashboardPresentationId === session.presentationId ? 'active' : ''
+                      }`}
+                      onClick={() => setSelectedDashboardPresentationId(session.presentationId)}
+                    >
+                      <span>{new Date(session.startedAtMs).toLocaleString()}</span>
+                      <span>
+                        Avg:{' '}
+                        {typeof session.averageEngagement === 'number'
+                          ? session.averageEngagement.toFixed(2)
+                          : 'n/a'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <EngagementDashboard
+              data={dashboardData}
+              selectedMemberIds={selectedMemberIds}
+              onSelectedMemberIdsChange={setSelectedMemberIds}
+            />
           </div>
         )}
 
@@ -1183,6 +1439,10 @@ function AppContent(): React.JSX.Element {
                   )}
 
                   <p className="live-agent-message">{liveAgentMessage}</p>
+                  <p className="live-agent-message">Engagement analyzer: {analyzerStatus}</p>
+                  {analyzerErrorMessage && (
+                    <p className="warn-text">Analyzer error: {analyzerErrorMessage}</p>
+                  )}
 
                   <form className="transcript-form" onSubmit={(event) => void handleManualTranscriptSubmit(event)}>
                     <label htmlFor="manual-transcript">Manual transcript test</label>
