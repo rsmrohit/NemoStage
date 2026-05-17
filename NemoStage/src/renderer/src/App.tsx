@@ -187,6 +187,11 @@ function AppContent(): React.JSX.Element {
   const [publicQADisplayEnabled, setPublicQADisplayEnabled] = useState(() => {
     return window.localStorage.getItem('nemostage.publicQADisplayEnabled') === 'true'
   })
+  const getDashboardSessionKey = useCallback(
+    (session: Pick<DashboardSessionSummary, 'sessionId' | 'startedAtMs'>): string =>
+      `${session.sessionId}:${session.startedAtMs}`,
+    []
+  )
   const publicQADisplayEnabledRef = useRef(publicQADisplayEnabled)
   const qaLastPollTsRef = useRef<number>(0)
   const qaPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -1537,8 +1542,3 @@ function App(): React.JSX.Element {
 }
 
 export default App
-  const getDashboardSessionKey = useCallback(
-    (session: Pick<DashboardSessionSummary, 'sessionId' | 'startedAtMs'>): string =>
-      `${session.sessionId}:${session.startedAtMs}`,
-    []
-  )
